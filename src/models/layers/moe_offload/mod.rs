@@ -4,7 +4,13 @@
 //!
 //! Design follows FreeToken (https://github.com/FlashML-org/FreeToken, Apache-2.0).
 
+//!
+//! Enable with `XINFER_MOE_OFFLOAD=<fraction of each layer's experts kept on GPU>`.
+
 pub mod budget;
+#[cfg(feature = "cuda")]
 pub mod cache;
+#[cfg(feature = "cuda")]
 pub mod host_banks;
+#[cfg(feature = "cuda")]
 pub mod prefill;

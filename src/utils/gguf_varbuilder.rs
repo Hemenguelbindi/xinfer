@@ -75,6 +75,16 @@ impl VarBuilder {
         }
     }
 
+    /// Same builder, loading tensors onto `device` (e.g. host RAM for offloaded experts).
+    pub fn with_device(&self, device: &Device) -> Self {
+        Self {
+            device: device.clone(),
+            // Own cache so a tensor loaded on one device is never served for the other.
+            cache: Arc::new(Mutex::new(None)),
+            ..self.clone()
+        }
+    }
+
     pub fn path(&self, tensor_name: &str) -> String {
         if self.path.is_empty() {
             tensor_name.to_string()

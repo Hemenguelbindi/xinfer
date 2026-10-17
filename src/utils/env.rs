@@ -7,7 +7,24 @@ pub const STREAM_AS_REASONING_CONTENT_ENV: &str = "XINFER_STREAM_AS_REASONING_CO
 
 pub const SM90_LOWER_PRECISION_GDN_PREFILL_ENV: &str = "SM90_LOWER_PRECISION_GDN_PREFILL";
 
+pub const MOE_OFFLOAD_ENV: &str = "XINFER_MOE_OFFLOAD";
+
 static STREAM_AS_REASONING_CONTENT: OnceLock<bool> = OnceLock::new();
+static MOE_OFFLOAD: OnceLock<Option<f32>> = OnceLock::new();
+
+/// Fraction (0, 1) of each MoE layer's experts kept on GPU; the rest stay in host RAM.
+pub fn moe_offload_rate() -> Option<f32> {
+    *MOE_OFFLOAD.get_or_init(|| {
+        let raw = env::var(MOE_OFFLOAD_ENV).ok()?;
+        match raw.trim().parse::<f32>() {
+            Ok(r) if r > 0.0 && r < 1.0 => Some(r),
+            _ => {
+                crate::log_warn!("Invalid {MOE_OFFLOAD_ENV}='{raw}', expected 0 < value < 1. Offload disabled.");
+                None
+            }
+        }
+    })
+}
 static SM90_LOWER_PRECISION_GDN_PREFILL: OnceLock<bool> = OnceLock::new();
 
 pub fn sm90_lower_precision_gdn_prefill() -> bool {

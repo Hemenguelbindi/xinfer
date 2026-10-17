@@ -2274,6 +2274,7 @@ mod tests {
         assert!(ensure_server_addr_available(&ServerAddr::Tcp(addr)).is_err());
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_ensure_server_addr_available_checks_and_cleans_unix_socket() {
         let path = temp_test_path("preflight.sock");
@@ -2291,6 +2292,7 @@ mod tests {
         std::fs::remove_file(path).unwrap();
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_ensure_server_addr_available_detects_bound_unix_socket() {
         let path = temp_test_path("bound.sock");
