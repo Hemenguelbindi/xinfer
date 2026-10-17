@@ -45,6 +45,10 @@ impl SlotCache {
         &self.dev
     }
 
+    pub fn num_slots(&self) -> usize {
+        self.lru.num_slots
+    }
+
     /// Decode stays on the GPU whenever the call cannot touch more experts than slots
     /// (fixed shape, so the choice is the same at graph capture and replay). Prefill runs
     /// eagerly and checks the distinct count on the host.

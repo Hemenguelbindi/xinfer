@@ -1,0 +1,64 @@
+{
+  "env": {
+    "platform": "windows",
+    "os": "Windows-11-10.0.26100-SP0",
+    "cpu": "Intel64 Family 6 Model 79 Stepping 1, GenuineIntel",
+    "gpu": "NVIDIA GeForce RTX 3060, 12288 MiB, 610.88, 3, 16",
+    "binary": "./target/release/xinfer.exe",
+    "git": "dddf34b",
+    "date": "2026-10-17 10:11"
+  },
+  "args": {
+    "bin": "./target/release/xinfer.exe",
+    "model": "F:/Models/Qwen3.6-35B-A3B-NVFP4-hf",
+    "rates": "0.2,0.35",
+    "mode": "server",
+    "prompt": "Explain in three sentences what a Mixture-of-Experts model is.",
+    "prompt_tokens": 0,
+    "max_tokens": 200,
+    "max_model_len": 8192,
+    "xinfer_args": "--kvcache-dtype turbo4",
+    "timeout": 1800,
+    "out": "bench/qwen36_windows_turbo4",
+    "keep_logs": true,
+    "needle": ""
+  },
+  "results": [
+    {
+      "cuda_graph": true,
+      "free_vram_gb": 4.39,
+      "kv_tokens": 519936.0,
+      "prefill_tps": 13.99,
+      "prompt_tokens": 28.0,
+      "response": "\n\nA Mixture-of-Experts (MoE) model is a machine learning architecture that consists of multiple specialized sub-models, known as \"experts,\" which work together to process input data. Instead of using all experts for every input, a gating mechanism dynamically selects and activates only a small subset of the most relevant experts for each specific task or data point. This selective activation allows the model to achieve high capacity and performance while significantly reducing computational costs compared to dense models.",
+      "ttft_ms": 2113.861299999826,
+      "chunks": 95,
+      "decode_tps": 23.303742290955903,
+      "itl_p50_ms": 41.35760000008304,
+      "itl_p95_ms": 56.65320000025531,
+      "itl_p99_ms": 68.19270000005417,
+      "itl_max_ms": 69.00120000000243,
+      "rate": 0.2,
+      "wall_s": 75.5,
+      "response_sha": "10297355a9ee"
+    },
+    {
+      "cuda_graph": true,
+      "free_vram_gb": 1.71,
+      "kv_tokens": 171840.0,
+      "prefill_tps": 33.25,
+      "prompt_tokens": 28.0,
+      "response": "\n\nA Mixture-of-Experts (MoE) model is a machine learning architecture that consists of multiple specialized sub-models, known as \"experts,\" which work together to process input data. Instead of using all experts for every input, a gating mechanism dynamically selects and activates only a small subset of the most relevant experts for each specific task or data point. This selective activation allows the model to achieve high capacity and performance while significantly reducing computational costs compared to dense models.",
+      "ttft_ms": 937.6209000001836,
+      "chunks": 95,
+      "decode_tps": 26.41278844275197,
+      "itl_p50_ms": 37.36109999999826,
+      "itl_p95_ms": 44.31530000010753,
+      "itl_p99_ms": 48.89769999999771,
+      "itl_max_ms": 48.90490000025238,
+      "rate": 0.35,
+      "wall_s": 71.5,
+      "response_sha": "10297355a9ee"
+    }
+  ]
+}

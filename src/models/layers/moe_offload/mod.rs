@@ -4,10 +4,12 @@
 //!
 //! Design follows FreeToken (https://github.com/FlashML-org/FreeToken, Apache-2.0).
 //!
-//! Enable with `XINFER_MOE_OFFLOAD=<fraction of each layer's experts kept on GPU>`.
+//! Enable with `XINFER_MOE_OFFLOAD=<fraction of each layer's experts kept on GPU>`, or
+//! `XINFER_MOE_OFFLOAD=auto` to fill the free VRAM (see `budget`).
 
 use candle_core::Tensor;
 
+#[cfg(feature = "cuda")]
 pub mod budget;
 #[cfg(feature = "cuda")]
 pub mod cache;

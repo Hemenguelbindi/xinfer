@@ -25,17 +25,38 @@ pub fn moe_offload_profile() -> bool {
 }
 
 /// Fraction (0, 1) of each MoE layer's experts kept on GPU; the rest stay in host RAM.
+/// `auto` returns 0.0: layers start with the minimum slots and grow to fill free VRAM
+/// after loading (see `moe_offload::budget`).
 pub fn moe_offload_rate() -> Option<f32> {
     *MOE_OFFLOAD.get_or_init(|| {
         let raw = env::var(MOE_OFFLOAD_ENV).ok()?;
         match raw.trim().parse::<f32>() {
+            _ if raw.trim().eq_ignore_ascii_case("auto") => Some(0.0),
             Ok(r) if r > 0.0 && r < 1.0 => Some(r),
             _ => {
-                crate::log_warn!("Invalid {MOE_OFFLOAD_ENV}='{raw}', expected 0 < value < 1. Offload disabled.");
+                crate::log_warn!(
+                    "Invalid {MOE_OFFLOAD_ENV}='{raw}', expected auto or 0 < value < 1. Offload disabled."
+                );
                 None
             }
         }
     })
+}
+
+pub fn moe_offload_auto() -> bool {
+    moe_offload_rate() == Some(0.0)
+}
+
+pub const MOE_OFFLOAD_RESERVE_ENV: &str = "XINFER_MOE_OFFLOAD_RESERVE_GB";
+
+/// VRAM (bytes) that `XINFER_MOE_OFFLOAD=auto` leaves free for the KV cache and workspaces.
+pub fn moe_offload_reserve_bytes() -> usize {
+    let gb = env::var(MOE_OFFLOAD_RESERVE_ENV)
+        .ok()
+        .and_then(|v| v.trim().parse::<f64>().ok())
+        .filter(|v| *v >= 0.0)
+        .unwrap_or(2.5);
+    (gb * (1u64 << 30) as f64) as usize
 }
 static SM90_LOWER_PRECISION_GDN_PREFILL: OnceLock<bool> = OnceLock::new();
 

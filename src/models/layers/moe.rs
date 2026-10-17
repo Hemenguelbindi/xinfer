@@ -1485,7 +1485,7 @@ impl FusedMoeGGUF {
 
         let (gate_experts, up_experts, down_experts) = match &vb.0 {
             #[cfg(feature = "cuda")]
-            Either::Right(_) if offload.is_some() => offload.as_ref().unwrap().slot_tensors(),
+            Either::Right(_) if offload.is_some() => offload.as_ref().unwrap().placeholders()?,
             Either::Right(v) => {
                 let packed_result = v.pp("ffn_gate_up_exps").get(
                     (
@@ -1622,16 +1622,14 @@ impl FusedMoeGGUF {
 
         let router_logits = self.gate.forward(&xs)?;
         let (topk_weights, topk_ids) = self.routing.route(&router_logits, is_prefill)?;
+        let resident = || [self.gate_experts.clone(), self.up_experts.clone(), self.down_experts.clone()];
         #[cfg(feature = "cuda")]
-        let (topk_ids, staged) = match &self.offload {
+        let (topk_ids, [gate_w, up_w, down_w]) = match &self.offload {
             Some(o) => o.prepare(topk_ids, is_prefill)?,
-            None => (topk_ids, None),
+            None => (topk_ids, resident()),
         };
         #[cfg(not(feature = "cuda"))]
-        let staged: Option<[Arc<QTensor>; 3]> = None;
-        let [gate_w, up_w, down_w] = staged.unwrap_or_else(|| {
-            [self.gate_experts.clone(), self.up_experts.clone(), self.down_experts.clone()]
-        });
+        let [gate_w, up_w, down_w] = resident();
         let (expert_ids, sorted_token_ids) = sort_expert_assignments(&topk_ids, is_prefill)?;
 
         let ys = {
@@ -3369,16 +3367,18 @@ impl FusedMoeNvfp4 {
                         [p.global_scales, p.input_scales, down_global_scales, down_input_scales],
                         moe_cfg.num_experts_per_tok,
                     )?;
-                    let w = o.slot_weights();
+                    // Unused while offloaded (forward reads `prepare`); empty so a later
+                    // slot resize can free the old slots.
+                    let e = Tensor::zeros(0, DType::U8, &candle_core::Device::Cuda(dev))?;
                     let gate_up = Nvfp4GateUpWeights::Fused(Nvfp4Projection {
-                        blocks: w.gate_up_blocks,
-                        scales: w.gate_up_scales,
-                        global_scales: w.gate_up_global,
-                        input_scales: w.gate_up_input,
+                        blocks: e.clone(),
+                        scales: e.clone(),
+                        global_scales: e.clone(),
+                        input_scales: e.clone(),
                         scales_swizzled: None,
                         half_scales: None,
                     });
-                    (Some(o), gate_up, w.down_blocks, w.down_scales, w.down_global, w.down_input)
+                    (Some(o), gate_up, e.clone(), e.clone(), e.clone(), e)
                 }
                 None => (None, gate_up, down_blocks, down_scales, down_global_scales, down_input_scales),
             };
