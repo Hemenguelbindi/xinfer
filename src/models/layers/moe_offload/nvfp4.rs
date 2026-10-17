@@ -12,7 +12,12 @@ use crate::models::layers::VarBuilderX;
 use candle_core::{CudaDevice, DType, Device, Result, Tensor};
 use std::sync::{Arc, RwLock};
 
-const ROLES: [&str; 4] = ["nvfp4_gate_up", "nvfp4_gate_up_scale", "nvfp4_down", "nvfp4_down_scale"];
+const ROLES: [&str; 4] = [
+    "nvfp4_gate_up",
+    "nvfp4_gate_up_scale",
+    "nvfp4_down",
+    "nvfp4_down_scale",
+];
 
 /// Slot tensors and their LRU; replaced as a whole by `resize`.
 struct Slots {
@@ -38,7 +43,8 @@ struct Inner {
 pub struct Nvfp4ExpertOffload(Arc<Inner>);
 
 fn arr4<T>(v: Vec<T>) -> [T; 4] {
-    v.try_into().unwrap_or_else(|_| unreachable!("four expert tensors"))
+    v.try_into()
+        .unwrap_or_else(|_| unreachable!("four expert tensors"))
 }
 
 /// CUDA device to offload onto when `XINFER_MOE_OFFLOAD` is set and supported here.
@@ -54,12 +60,19 @@ pub fn offload_device(vb: &VarBuilderX, world_size: usize) -> Result<Option<Cuda
         return Ok(None);
     }
     if attention_rs::cuda_utils::sm_version(&dev).unwrap_or(0) >= 100 {
-        candle_core::bail!("XINFER_MOE_OFFLOAD: NVFP4 swizzled scales (SM100+) are not supported yet");
+        candle_core::bail!(
+            "XINFER_MOE_OFFLOAD: NVFP4 swizzled scales (SM100+) are not supported yet"
+        );
     }
     Ok(Some(dev))
 }
 
-fn make_slots(dev: &CudaDevice, num_experts: usize, big_dims: &[Vec<usize>; 4], num_slots: usize) -> Result<Slots> {
+fn make_slots(
+    dev: &CudaDevice,
+    num_experts: usize,
+    big_dims: &[Vec<usize>; 4],
+    num_slots: usize,
+) -> Result<Slots> {
     let gpu = Device::Cuda(dev.clone());
     let mut big = Vec::with_capacity(4);
     for dims in big_dims {
@@ -67,13 +80,22 @@ fn make_slots(dev: &CudaDevice, num_experts: usize, big_dims: &[Vec<usize>; 4], 
         d[0] = num_slots;
         big.push(Tensor::zeros(d, DType::U8, &gpu)?);
     }
-    let vecs = arr4((0..4).map(|_| Tensor::zeros(num_slots, DType::F32, &gpu)).collect::<Result<Vec<_>>>()?);
+    let vecs = arr4(
+        (0..4)
+            .map(|_| Tensor::zeros(num_slots, DType::F32, &gpu))
+            .collect::<Result<Vec<_>>>()?,
+    );
     let mut dst = [0u64; 8];
     for i in 0..4 {
         dst[i] = dev_ptr(&big[i])?;
         dst[4 + i] = dev_ptr(&vecs[i])?;
     }
-    Ok(Slots { cache: SlotCache::new(dev, num_experts, num_slots)?, big: arr4(big), vecs, dst })
+    Ok(Slots {
+        cache: SlotCache::new(dev, num_experts, num_slots)?,
+        big: arr4(big),
+        vecs,
+        dst,
+    })
 }
 
 impl SlotPool for Inner {
@@ -90,7 +112,8 @@ impl SlotPool for Inner {
         self.bytes.iter().sum::<u64>() as usize
     }
     fn resize(&self, num_slots: usize) -> Result<()> {
-        *self.slots.write().unwrap() = make_slots(&self.dev, self.num_experts, &self.big_dims, num_slots)?;
+        *self.slots.write().unwrap() =
+            make_slots(&self.dev, self.num_experts, &self.big_dims, num_slots)?;
         Ok(())
     }
 }
@@ -104,11 +127,19 @@ impl Nvfp4ExpertOffload {
         let num_experts = big[0].dim(0)?;
         let (mut banks, mut big_dims, mut staging) = (Vec::new(), Vec::new(), Vec::new());
         for (t, role) in big.iter().zip(ROLES) {
-            banks.push(HostBank::new(dev, &t.flatten_all()?.to_vec1::<u8>()?, num_experts)?);
+            banks.push(HostBank::new(
+                dev,
+                &t.flatten_all()?.to_vec1::<u8>()?,
+                num_experts,
+            )?);
             staging.push(staging_bytes(dev, role, t.dims())?);
             big_dims.push(t.dims().to_vec());
         }
-        let full_vecs = arr4(vecs.iter().map(|v| v.to_dtype(DType::F32)?.to_device(&gpu)).collect::<Result<Vec<_>>>()?);
+        let full_vecs = arr4(
+            vecs.iter()
+                .map(|v| v.to_dtype(DType::F32)?.to_device(&gpu))
+                .collect::<Result<Vec<_>>>()?,
+        );
         // Gather list: 4 big host banks, then the 4 scale vectors (device -> device, 4 bytes).
         let (mut src, mut bytes) = ([0u64; 8], [0u64; 8]);
         for i in 0..4 {
@@ -116,7 +147,12 @@ impl Nvfp4ExpertOffload {
             (src[4 + i], bytes[4 + i]) = (dev_ptr(&full_vecs[i])?, 4);
         }
         let big_dims = arr4(big_dims);
-        let slots = make_slots(dev, num_experts, &big_dims, SlotCache::slots_for(rate, num_experts, topk))?;
+        let slots = make_slots(
+            dev,
+            num_experts,
+            &big_dims,
+            SlotCache::slots_for(rate, num_experts, topk),
+        )?;
         let inner = Arc::new(Inner {
             dev: dev.clone(),
             num_experts,

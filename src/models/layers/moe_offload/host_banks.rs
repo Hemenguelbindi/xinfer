@@ -40,7 +40,12 @@ impl HostBank {
         let mut dev_ptr: sys::CUdeviceptr = 0;
         let mapped = unsafe { sys::lib().cuMemHostGetDevicePointer_v2(&mut dev_ptr, ptr as _, 0) };
         // Built before the check so an error still frees the pinned memory.
-        let mut bank = Self { ptr, len: bytes.len(), dev_ptr: 0, expert_bytes: bytes.len() / num_experts };
+        let mut bank = Self {
+            ptr,
+            len: bytes.len(),
+            dev_ptr: 0,
+            expert_bytes: bytes.len() / num_experts,
+        };
         mapped.result().map_err(candle_core::Error::wrap)?;
         bank.dev_ptr = dev_ptr;
         Ok(bank)

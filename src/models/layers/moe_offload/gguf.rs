@@ -31,16 +31,28 @@ struct Inner {
 pub struct GgufExpertOffload(Arc<Inner>);
 
 fn arr3<T>(v: Vec<T>) -> [T; 3] {
-    v.try_into().unwrap_or_else(|_| unreachable!("three expert weights"))
+    v.try_into()
+        .unwrap_or_else(|_| unreachable!("three expert weights"))
 }
 
-fn make_slots(dev: &CudaDevice, num_experts: usize, shapes: &[(usize, usize, GgmlDType); 3], num_slots: usize) -> Result<Slots> {
+fn make_slots(
+    dev: &CudaDevice,
+    num_experts: usize,
+    shapes: &[(usize, usize, GgmlDType); 3],
+    num_slots: usize,
+) -> Result<Slots> {
     let mut weights = Vec::with_capacity(3);
     for &(n, k, dtype) in shapes {
         let st = QCudaStorage::zeros(dev, num_slots * n * k, dtype)?;
-        weights.push(Arc::new(QTensor::new(QStorage::Cuda(st), (num_slots, n, k))?));
+        weights.push(Arc::new(QTensor::new(
+            QStorage::Cuda(st),
+            (num_slots, n, k),
+        )?));
     }
-    Ok(Slots { cache: SlotCache::new(dev, num_experts, num_slots)?, weights: arr3(weights) })
+    Ok(Slots {
+        cache: SlotCache::new(dev, num_experts, num_slots)?,
+        weights: arr3(weights),
+    })
 }
 
 impl SlotPool for Inner {
@@ -57,7 +69,8 @@ impl SlotPool for Inner {
         self.banks.iter().map(|b| b.expert_bytes).sum()
     }
     fn resize(&self, num_slots: usize) -> Result<()> {
-        *self.slots.write().unwrap() = make_slots(&self.dev, self.num_experts, &self.shapes, num_slots)?;
+        *self.slots.write().unwrap() =
+            make_slots(&self.dev, self.num_experts, &self.shapes, num_slots)?;
         Ok(())
     }
 }
@@ -76,12 +89,18 @@ impl GgufExpertOffload {
         let num_experts = moe_cfg.num_experts.unwrap();
         let (h, i) = (cfg.hidden_size, moe_cfg.moe_intermediate_size);
         if v.pp("ffn_gate_up_exps").contains_key("weight") {
-            candle_core::bail!("XINFER_MOE_OFFLOAD: packed ffn_gate_up_exps GGUF is not supported yet");
+            candle_core::bail!(
+                "XINFER_MOE_OFFLOAD: packed ffn_gate_up_exps GGUF is not supported yet"
+            );
         }
 
         let host = v.with_device(&Device::Cpu);
         let names = ["ffn_gate_exps", "ffn_up_exps", "ffn_down_exps"];
-        let dims = [[num_experts, i, h], [num_experts, i, h], [num_experts, h, i]];
+        let dims = [
+            [num_experts, i, h],
+            [num_experts, i, h],
+            [num_experts, h, i],
+        ];
         let (mut banks, mut shapes, mut staging) = (Vec::new(), Vec::new(), Vec::new());
         for role in 0..3 {
             let t = host.pp(names[role]).get(dims[role].to_vec(), "weight")?;
@@ -118,14 +137,21 @@ impl GgufExpertOffload {
         let one = |i: usize| -> Result<Arc<QTensor>> {
             let dtype = self.0.shapes[i].2;
             let st = QCudaStorage::zeros(&self.0.dev, dtype.block_size(), dtype)?;
-            Ok(Arc::new(QTensor::new(QStorage::Cuda(st), (1, 1, dtype.block_size()))?))
+            Ok(Arc::new(QTensor::new(
+                QStorage::Cuda(st),
+                (1, 1, dtype.block_size()),
+            )?))
         };
         Ok((one(0)?, one(1)?, one(2)?))
     }
 
     /// Makes the routed experts resident. Returns the ids to use (slot ids, or the
     /// original ids with full-layer staging) and the weights the GEMMs must read.
-    pub fn prepare(&self, topk_ids: Tensor, is_prefill: bool) -> Result<(Tensor, [Arc<QTensor>; 3])> {
+    pub fn prepare(
+        &self,
+        topk_ids: Tensor,
+        is_prefill: bool,
+    ) -> Result<(Tensor, [Arc<QTensor>; 3])> {
         let o = &self.0;
         let s = o.slots.read().unwrap();
         let t = profile_begin(&o.dev)?;

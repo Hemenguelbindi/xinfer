@@ -1377,7 +1377,9 @@ impl FusedMoeGGUF {
 
         let bias = try_load_e_score_correction_bias(&vb, num_experts);
         if crate::utils::env::moe_offload_rate().is_some() {
-            crate::log_warn!("XINFER_MOE_OFFLOAD is ignored with tensor parallelism (world_size > 1)");
+            crate::log_warn!(
+                "XINFER_MOE_OFFLOAD is ignored with tensor parallelism (world_size > 1)"
+            );
         }
 
         Ok(Self {
@@ -1481,7 +1483,8 @@ impl FusedMoeGGUF {
         let gate = Linear::new(gate_ws, None, &None)?;
 
         #[cfg(feature = "cuda")]
-        let offload = crate::models::layers::moe_offload::gguf::GgufExpertOffload::from_env(&vb, cfg)?;
+        let offload =
+            crate::models::layers::moe_offload::gguf::GgufExpertOffload::from_env(&vb, cfg)?;
 
         let (gate_experts, up_experts, down_experts) = match &vb.0 {
             #[cfg(feature = "cuda")]
@@ -1622,7 +1625,13 @@ impl FusedMoeGGUF {
 
         let router_logits = self.gate.forward(&xs)?;
         let (topk_weights, topk_ids) = self.routing.route(&router_logits, is_prefill)?;
-        let resident = || [self.gate_experts.clone(), self.up_experts.clone(), self.down_experts.clone()];
+        let resident = || {
+            [
+                self.gate_experts.clone(),
+                self.up_experts.clone(),
+                self.down_experts.clone(),
+            ]
+        };
         #[cfg(feature = "cuda")]
         let (topk_ids, [gate_w, up_w, down_w]) = match &self.offload {
             Some(o) => o.prepare(topk_ids, is_prefill)?,
@@ -2953,8 +2962,10 @@ impl FusedMoeNvfp4 {
 
         // Offload loads the experts into host RAM through the lazy CPU var builder.
         #[cfg(feature = "cuda")]
-        let offload_dev =
-            crate::models::layers::moe_offload::nvfp4::offload_device(&experts_vb, comm.world_size())?;
+        let offload_dev = crate::models::layers::moe_offload::nvfp4::offload_device(
+            &experts_vb,
+            comm.world_size(),
+        )?;
         #[cfg(feature = "cuda")]
         let cpu_experts = match &offload_dev {
             Some(_) => Some(VarBuilderX(
@@ -3359,12 +3370,19 @@ impl FusedMoeNvfp4 {
             match offload_dev {
                 Some(dev) => {
                     let Nvfp4GateUpWeights::Fused(p) = gate_up else {
-                        candle_core::bail!("XINFER_MOE_OFFLOAD: separate NVFP4 gate/up is not supported");
+                        candle_core::bail!(
+                            "XINFER_MOE_OFFLOAD: separate NVFP4 gate/up is not supported"
+                        );
                     };
                     let o = crate::models::layers::moe_offload::nvfp4::Nvfp4ExpertOffload::new(
                         &dev,
                         [p.blocks, p.scales, down_blocks, down_scales],
-                        [p.global_scales, p.input_scales, down_global_scales, down_input_scales],
+                        [
+                            p.global_scales,
+                            p.input_scales,
+                            down_global_scales,
+                            down_input_scales,
+                        ],
                         moe_cfg.num_experts_per_tok,
                     )?;
                     // Unused while offloaded (forward reads `prepare`); empty so a later
@@ -3380,7 +3398,14 @@ impl FusedMoeNvfp4 {
                     });
                     (Some(o), gate_up, e.clone(), e.clone(), e.clone(), e)
                 }
-                None => (None, gate_up, down_blocks, down_scales, down_global_scales, down_input_scales),
+                None => (
+                    None,
+                    gate_up,
+                    down_blocks,
+                    down_scales,
+                    down_global_scales,
+                    down_input_scales,
+                ),
             };
 
         Ok(Self {
@@ -3532,7 +3557,13 @@ impl FusedMoeNvfp4 {
         };
 
         let (d_blocks, d_scales, d_global, d_input, d_swizzled) = match &offloaded {
-            Some(w) => (&w.down_blocks, &w.down_scales, &w.down_global, &w.down_input, None),
+            Some(w) => (
+                &w.down_blocks,
+                &w.down_scales,
+                &w.down_global,
+                &w.down_input,
+                None,
+            ),
             None => (
                 &self.down_blocks,
                 &self.down_scales,

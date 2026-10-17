@@ -224,7 +224,9 @@ pub fn run_runner() -> anyhow::Result<()> {
                 } else if xinfer::utils::is_no_cuda_graph_supprt(arch.clone()) {
                     xinfer::log_info!("{arch} does not supprt CUDA graph");
                 } else if xinfer::utils::env::moe_offload_profile() {
-                    xinfer::log_info!("CUDA graph disabled: XINFER_MOE_OFFLOAD_PROFILE syncs every MoE call");
+                    xinfer::log_info!(
+                        "CUDA graph disabled: XINFER_MOE_OFFLOAD_PROFILE syncs every MoE call"
+                    );
                 } else if xinfer::utils::qwen4_has_ple(&init_req.config) {
                     xinfer::log_info!(
                         "CUDA graph disabled: Qwen4 PLE n-gram embedding gathers on host memory"
@@ -397,7 +399,11 @@ pub fn run_runner() -> anyhow::Result<()> {
             Ok(MessageType::RemoveMambaPrefixState(hash)) => {
                 let ret = runner.remove_mamba_prefix_state(hash);
                 if ret.is_err() {
-                    xinfer::log_error!("RemoveMambaPrefixState failed for hash {}: {:?}", hash, ret);
+                    xinfer::log_error!(
+                        "RemoveMambaPrefixState failed for hash {}: {:?}",
+                        hash,
+                        ret
+                    );
                 }
                 send_local(
                     &mut vec![stream.try_clone()?],

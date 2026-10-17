@@ -76,7 +76,8 @@ impl SlotCache {
     /// Copies the last plan's misses: bank `b` expert `e` from `src[b] + e * bytes[b]` to
     /// `dst[b] + slot * bytes[b]`.
     pub fn gather(&self, src: &[u64], dst: &[u64], bytes: &[u64]) -> Result<()> {
-        self.lru.gather(&Device::Cuda(self.dev.clone()), src, dst, bytes)
+        self.lru
+            .gather(&Device::Cuda(self.dev.clone()), src, dst, bytes)
     }
 
     // Counters live on the GPU; they are folded in on prefill, which syncs anyway.
@@ -105,7 +106,8 @@ impl SlotCache {
 
 /// Async host->device copy on candle's stream, ordered with the kernels (pinned source).
 pub fn copy_htod(dev: &CudaDevice, dst: u64, src: &[u8]) -> Result<()> {
-    unsafe { result::memcpy_htod_async(dst, src, *dev.cu_stream()) }.map_err(candle_core::Error::wrap)
+    unsafe { result::memcpy_htod_async(dst, src, *dev.cu_stream()) }
+        .map_err(candle_core::Error::wrap)
 }
 
 /// Device address of a contiguous u8 or f32 CUDA tensor.
@@ -128,7 +130,11 @@ struct Profile {
     calls: u64,
 }
 
-static PROFILE: Mutex<Profile> = Mutex::new(Profile { last_end: None, sums: [0.0; 4], calls: 0 });
+static PROFILE: Mutex<Profile> = Mutex::new(Profile {
+    last_end: None,
+    sums: [0.0; 4],
+    calls: 0,
+});
 
 fn sync(dev: &CudaDevice) -> Result<()> {
     dev.synchronize().map_err(candle_core::Error::wrap)
@@ -185,7 +191,9 @@ mod tests {
 
     #[test]
     fn gpu_lru_keeps_current_experts_evicts_oldest_and_gathers() -> Result<()> {
-        let Ok(Device::Cuda(dev)) = Device::new_cuda(0) else { return Ok(()) };
+        let Ok(Device::Cuda(dev)) = Device::new_cuda(0) else {
+            return Ok(());
+        };
         let gpu = Device::Cuda(dev.clone());
         let cache = SlotCache::new(&dev, 4, 2)?;
         // 4 experts of 32 bytes in host memory, expert e filled with byte e+1.

@@ -34,7 +34,12 @@ fn targets(pools: &[(usize, usize, usize)], budget: usize) -> Vec<usize> {
     let mut slots: Vec<usize> = pools.iter().map(|p| p.0).collect();
     let mut left = budget.saturating_sub(pools.iter().map(|p| p.0 * p.2).sum());
     loop {
-        let cost: usize = pools.iter().zip(&slots).filter(|(p, s)| **s < p.1).map(|(p, _)| p.2).sum();
+        let cost: usize = pools
+            .iter()
+            .zip(&slots)
+            .filter(|(p, s)| **s < p.1)
+            .map(|(p, _)| p.2)
+            .sum();
         if cost == 0 || cost > left {
             return slots;
         }
@@ -50,13 +55,21 @@ fn targets(pools: &[(usize, usize, usize)], budget: usize) -> Vec<usize> {
 /// Grows every registered layer's slots into the free VRAM; call once after model load.
 pub fn grow_to_free_vram() -> Result<()> {
     let pools = std::mem::take(&mut *POOLS.lock().unwrap());
-    let Some(first) = pools.first() else { return Ok(()) };
-    first.device().bind_to_thread().map_err(candle_core::Error::wrap)?;
+    let Some(first) = pools.first() else {
+        return Ok(());
+    };
+    first
+        .device()
+        .bind_to_thread()
+        .map_err(candle_core::Error::wrap)?;
     let (free, _) = result::mem_get_info().map_err(candle_core::Error::wrap)?;
     let reserve = crate::utils::env::moe_offload_reserve_bytes();
     let used: usize = pools.iter().map(|p| p.num_slots() * p.slot_bytes()).sum();
     let budget = (free + used).saturating_sub(reserve);
-    let spec: Vec<_> = pools.iter().map(|p| (p.num_slots(), p.num_experts(), p.slot_bytes())).collect();
+    let spec: Vec<_> = pools
+        .iter()
+        .map(|p| (p.num_slots(), p.num_experts(), p.slot_bytes()))
+        .collect();
     let new = targets(&spec, budget);
     for (p, &n) in pools.iter().zip(&new) {
         if n != p.num_slots() {
@@ -64,7 +77,10 @@ pub fn grow_to_free_vram() -> Result<()> {
         }
     }
     // Freed slots return to the driver only at a sync; the KV planner must see them.
-    first.device().synchronize().map_err(candle_core::Error::wrap)?;
+    first
+        .device()
+        .synchronize()
+        .map_err(candle_core::Error::wrap)?;
     let (free_after, _) = result::mem_get_info().map_err(candle_core::Error::wrap)?;
     let (min, max) = (new.iter().min().unwrap(), new.iter().max().unwrap());
     let experts: usize = spec.iter().map(|s| s.1).sum();

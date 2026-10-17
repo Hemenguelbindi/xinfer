@@ -12,7 +12,11 @@ type Key = (String, Vec<usize>);
 static QUANT: Mutex<Vec<(Key, Arc<QTensor>)>> = Mutex::new(Vec::new());
 static BYTES: Mutex<Vec<(Key, Tensor)>> = Mutex::new(Vec::new());
 
-fn get_or_make<T: Clone>(store: &Mutex<Vec<(Key, T)>>, key: Key, make: impl FnOnce() -> Result<T>) -> Result<T> {
+fn get_or_make<T: Clone>(
+    store: &Mutex<Vec<(Key, T)>>,
+    key: Key,
+    make: impl FnOnce() -> Result<T>,
+) -> Result<T> {
     let mut all = store.lock().unwrap();
     if let Some((_, t)) = all.iter().find(|(k, _)| *k == key) {
         return Ok(t.clone());
@@ -23,7 +27,12 @@ fn get_or_make<T: Clone>(store: &Mutex<Vec<(Key, T)>>, key: Key, make: impl FnOn
 }
 
 /// GGUF staging buffer for weight `role` with this dtype and `[E, N, K]` shape.
-pub fn staging_quant(dev: &CudaDevice, role: &str, dtype: GgmlDType, dims: &[usize]) -> Result<Arc<QTensor>> {
+pub fn staging_quant(
+    dev: &CudaDevice,
+    role: &str,
+    dtype: GgmlDType,
+    dims: &[usize],
+) -> Result<Arc<QTensor>> {
     get_or_make(&QUANT, (format!("{role}/{dtype:?}"), dims.to_vec()), || {
         let st = QCudaStorage::zeros(dev, dims.iter().product(), dtype)?;
         Ok(Arc::new(QTensor::new(QStorage::Cuda(st), dims)?))
