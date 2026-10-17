@@ -1624,7 +1624,7 @@ impl FusedMoeGGUF {
         let (topk_weights, topk_ids) = self.routing.route(&router_logits, is_prefill)?;
         #[cfg(feature = "cuda")]
         let (topk_ids, staged) = match &self.offload {
-            Some(o) => o.prepare(topk_ids)?,
+            Some(o) => o.prepare(topk_ids, is_prefill)?,
             None => (topk_ids, None),
         };
         #[cfg(not(feature = "cuda"))]
@@ -3449,7 +3449,7 @@ impl FusedMoeNvfp4 {
         #[cfg(feature = "cuda")]
         let (topk_ids, offloaded) = match &self.offload {
             Some(o) => {
-                let (ids, w) = o.prepare(topk_ids)?;
+                let (ids, w) = o.prepare(topk_ids, is_prefill)?;
                 (ids, Some(w))
             }
             None => (topk_ids, None),

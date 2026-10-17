@@ -223,8 +223,8 @@ pub fn run_runner() -> anyhow::Result<()> {
                     xinfer::log_info!("CUDA graph capture disabled by --disable-cuda-graph");
                 } else if xinfer::utils::is_no_cuda_graph_supprt(arch.clone()) {
                     xinfer::log_info!("{arch} does not supprt CUDA graph");
-                } else if xinfer::utils::env::moe_offload_rate().is_some() {
-                    xinfer::log_info!("CUDA graph disabled: MoE expert offload routes on the host");
+                } else if xinfer::utils::env::moe_offload_profile() {
+                    xinfer::log_info!("CUDA graph disabled: XINFER_MOE_OFFLOAD_PROFILE syncs every MoE call");
                 } else if xinfer::utils::qwen4_has_ple(&init_req.config) {
                     xinfer::log_info!(
                         "CUDA graph disabled: Qwen4 PLE n-gram embedding gathers on host memory"
