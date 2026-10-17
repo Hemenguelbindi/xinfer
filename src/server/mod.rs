@@ -1396,6 +1396,14 @@ pub fn ensure_server_addr_available(addr: &ServerAddr) -> candle_core::Result<()
                 ))
             })?;
         }
+        #[cfg(not(unix))]
+        ServerAddr::Unix(path) => {
+            candle_core::bail!(
+                "Unix socket {} is not supported on this platform; use --server host:port.",
+                path.display()
+            );
+        }
+        #[cfg(unix)]
         ServerAddr::Unix(path) => {
             let listener = std::os::unix::net::UnixListener::bind(path).map_err(|e| {
                 candle_core::Error::Msg(format!(
@@ -1656,6 +1664,14 @@ pub async fn run_server(
                 }));
             }
         }
+        #[cfg(not(unix))]
+        ServerAddr::Unix(path) => {
+            candle_core::bail!(
+                "Unix socket {} is not supported on this platform; use --server host:port.",
+                path.display()
+            );
+        }
+        #[cfg(unix)]
         ServerAddr::Unix(path) => {
             if with_ui_server {
                 candle_core::bail!("--ui-server is not supported with Unix sockets.");
