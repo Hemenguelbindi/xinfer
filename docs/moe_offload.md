@@ -54,10 +54,10 @@ MTP (`--num-speculative-tokens`) works but was slower in our tests.
 
 ## Benchmarks
 
-Reproduce with `scripts/bench_moe_offload.py` (rate `0` = baseline without offload):
+Reproduce with `bench/bench_moe_offload.py` (rate `0` = baseline without offload):
 
 ```bash
-python3 scripts/bench_moe_offload.py --bin target/release/xinfer \
+python3 bench/bench_moe_offload.py --bin target/release/xinfer \
     --model /models/Qwen3.6-35B-A3B-NVFP4 --rates 0,0.1,0.2,0.35,auto --out bench/qwen36
 ```
 
