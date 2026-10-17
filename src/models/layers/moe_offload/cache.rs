@@ -8,10 +8,61 @@ use candle_core::cuda_backend::cudarc::driver::{result, DevicePtr};
 use candle_core::{CudaDevice, Result, Storage, Tensor};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
+use std::time::Instant;
 
 static HITS: AtomicU64 = AtomicU64::new(0);
 static MISSES: AtomicU64 = AtomicU64::new(0);
 static STAGED: AtomicU64 = AtomicU64::new(0);
+
+struct Profile {
+    last_end: Option<Instant>,
+    sums: [f64; 4], // gap, gpu-wait, host, copy (seconds)
+    calls: u64,
+}
+
+static PROFILE: Mutex<Profile> = Mutex::new(Profile { last_end: None, sums: [0.0; 4], calls: 0 });
+
+fn sync(dev: &CudaDevice) -> Result<()> {
+    dev.synchronize().map_err(candle_core::Error::wrap)
+}
+
+/// `XINFER_MOE_OFFLOAD_PROFILE=1`: splits each MoE call's time into CPU-side launch gap
+/// since the previous call, leftover GPU work, host LRU and PCIe copy. Adds two device
+/// syncs per call, so absolute speed drops a little; use it only to find the bottleneck.
+pub fn profile_begin(dev: &CudaDevice) -> Result<Option<Instant>> {
+    if !crate::utils::env::moe_offload_profile() {
+        return Ok(None);
+    }
+    let t0 = Instant::now();
+    sync(dev)?;
+    let t1 = Instant::now();
+    let mut p = PROFILE.lock().unwrap();
+    if let Some(last) = p.last_end {
+        p.sums[0] += (t0 - last).as_secs_f64();
+    }
+    p.sums[1] += (t1 - t0).as_secs_f64();
+    Ok(Some(t1))
+}
+
+pub fn profile_end(dev: &CudaDevice, begin: Option<Instant>) -> Result<()> {
+    let Some(t1) = begin else { return Ok(()) };
+    let t2 = Instant::now();
+    sync(dev)?;
+    let t3 = Instant::now();
+    let mut p = PROFILE.lock().unwrap();
+    p.sums[2] += (t2 - t1).as_secs_f64();
+    p.sums[3] += (t3 - t2).as_secs_f64();
+    p.calls += 1;
+    p.last_end = Some(t3);
+    if p.calls % 400 == 0 {
+        let ms = p.sums.map(|s| 1e3 * s / p.calls as f64);
+        crate::log_info!(
+            "MoE offload profile ({} calls), avg ms per MoE call: gap {:.2}, gpu-wait {:.2}, host {:.2}, copy {:.2}",
+            p.calls, ms[0], ms[1], ms[2], ms[3]
+        );
+    }
+    Ok(())
+}
 
 /// Where one MoE call's experts live.
 pub enum Placement {

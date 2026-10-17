@@ -1,7 +1,7 @@
 //! Offloaded GGUF experts (`FusedMoeGGUF`): gate/up/down banks in host RAM,
 //! `[num_slots, N, K]` slot QTensors on GPU.
 
-use super::cache::{copy_htod, Placement, SlotLru};
+use super::cache::{copy_htod, profile_begin, profile_end, Placement, SlotLru};
 use super::host_banks::HostBank;
 use super::prefill::staging_quant;
 use crate::models::layers::VarBuilderX;
@@ -78,6 +78,13 @@ impl GgufExpertOffload {
     /// Makes the routed experts resident. Returns ids rewritten to slot ids (weights =
     /// slot tensors, `None`), or the original ids with full-layer staging weights.
     pub fn prepare(&self, topk_ids: Tensor) -> Result<(Tensor, Option<[Arc<QTensor>; 3]>)> {
+        let t = profile_begin(&self.dev)?;
+        let out = self.prepare_inner(topk_ids)?;
+        profile_end(&self.dev, t)?;
+        Ok(out)
+    }
+
+    fn prepare_inner(&self, topk_ids: Tensor) -> Result<(Tensor, Option<[Arc<QTensor>; 3]>)> {
         let ids: Vec<u32> = topk_ids.flatten_all()?.to_vec1()?;
         match self.lru.place(&ids) {
             Placement::Staged => {

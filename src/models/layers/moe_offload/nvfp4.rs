@@ -2,7 +2,7 @@
 //! in host RAM, `[num_slots, ...]` u8 slot tensors on GPU. The per-expert global and
 //! input scales are tiny, so their slot-ordered copies are rebuilt on the host.
 
-use super::cache::{copy_htod, u8_ptr, Placement, SlotLru};
+use super::cache::{copy_htod, profile_begin, profile_end, u8_ptr, Placement, SlotLru};
 use super::host_banks::HostBank;
 use super::prefill::staging_bytes;
 use super::Nvfp4Weights;
@@ -101,6 +101,13 @@ impl Nvfp4ExpertOffload {
     /// Makes the routed experts resident; returns slot ids (or the original ids with
     /// full-layer staging weights) and the weights the kernels must read.
     pub fn prepare(&self, topk_ids: Tensor) -> Result<(Tensor, Nvfp4Weights)> {
+        let t = profile_begin(&self.dev)?;
+        let out = self.prepare_inner(topk_ids)?;
+        profile_end(&self.dev, t)?;
+        Ok(out)
+    }
+
+    fn prepare_inner(&self, topk_ids: Tensor) -> Result<(Tensor, Nvfp4Weights)> {
         let ids: Vec<u32> = topk_ids.flatten_all()?.to_vec1()?;
         match self.lru.place(&ids) {
             Placement::Staged => {

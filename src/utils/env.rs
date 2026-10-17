@@ -12,6 +12,18 @@ pub const MOE_OFFLOAD_ENV: &str = "XINFER_MOE_OFFLOAD";
 static STREAM_AS_REASONING_CONTENT: OnceLock<bool> = OnceLock::new();
 static MOE_OFFLOAD: OnceLock<Option<f32>> = OnceLock::new();
 
+pub const MOE_OFFLOAD_PROFILE_ENV: &str = "XINFER_MOE_OFFLOAD_PROFILE";
+static MOE_OFFLOAD_PROFILE: OnceLock<bool> = OnceLock::new();
+
+/// Per-call timing breakdown for MoE expert offload (adds device syncs).
+pub fn moe_offload_profile() -> bool {
+    *MOE_OFFLOAD_PROFILE.get_or_init(|| {
+        env::var(MOE_OFFLOAD_PROFILE_ENV)
+            .map(|v| matches!(v.trim(), "1" | "true" | "yes"))
+            .unwrap_or(false)
+    })
+}
+
 /// Fraction (0, 1) of each MoE layer's experts kept on GPU; the rest stay in host RAM.
 pub fn moe_offload_rate() -> Option<f32> {
     *MOE_OFFLOAD.get_or_init(|| {
