@@ -980,7 +980,7 @@ pub struct FusedMoeGGUF {
     world_size: usize,
     dtype: DType,
     #[cfg(feature = "cuda")]
-    offload: Option<crate::models::layers::moe_offload::cache::GgufExpertOffload>,
+    offload: Option<crate::models::layers::moe_offload::gguf::GgufExpertOffload>,
 }
 
 /// Dtypes supported by `moe_gemm_gguf` kernel and `QTensor::quantize`.
@@ -1481,7 +1481,7 @@ impl FusedMoeGGUF {
         let gate = Linear::new(gate_ws, None, &None)?;
 
         #[cfg(feature = "cuda")]
-        let offload = crate::models::layers::moe_offload::cache::GgufExpertOffload::from_env(&vb, cfg)?;
+        let offload = crate::models::layers::moe_offload::gguf::GgufExpertOffload::from_env(&vb, cfg)?;
 
         let (gate_experts, up_experts, down_experts) = match &vb.0 {
             #[cfg(feature = "cuda")]
@@ -2714,9 +2714,9 @@ enum Nvfp4GateUpWeights {
 
 fn maybe_swizzle_nvfp4_scales(_scales: &Tensor) -> Result<Option<Tensor>> {
     #[cfg(feature = "cuda")]
-    {
-        let sm = attention_rs::cuda_utils::sm_version(_scales.device().as_cuda_device()?)
-            .unwrap_or(0) as usize;
+    if let Ok(dev) = _scales.device().as_cuda_device() {
+        // Host-resident (offloaded) scales are never swizzled; see moe_offload::nvfp4.
+        let sm = attention_rs::cuda_utils::sm_version(dev).unwrap_or(0) as usize;
         if sm >= 100 {
             return Ok(Some(
                 attention_rs::nvfp4_linear::swizzle_nvfp4_weight_scales(_scales)?,
@@ -2771,6 +2771,8 @@ pub struct FusedMoeNvfp4 {
     dtype: DType,
     apply_router_weight_on_input: bool,
     gate_dtype: DType,
+    #[cfg(feature = "cuda")]
+    offload: Option<crate::models::layers::moe_offload::nvfp4::Nvfp4ExpertOffload>,
 }
 
 impl FusedMoeNvfp4 {
@@ -2950,6 +2952,26 @@ impl FusedMoeNvfp4 {
         let mut down_gscales_vec: Vec<f32> = Vec::new();
         let mut down_iscales_vec: Vec<f32> = Vec::new();
         let mut gate_up: Option<Nvfp4GateUpWeights> = None;
+
+        // Offload loads the experts into host RAM through the lazy CPU var builder.
+        #[cfg(feature = "cuda")]
+        let offload_dev =
+            crate::models::layers::moe_offload::nvfp4::offload_device(&experts_vb, comm.world_size())?;
+        #[cfg(feature = "cuda")]
+        let cpu_experts = match &offload_dev {
+            Some(_) => Some(VarBuilderX(
+                Either::Left(experts_vb.cpu_var_builder().ok_or_else(|| {
+                    candle_core::Error::Msg("XINFER_MOE_OFFLOAD: no CPU var builder".into())
+                })?),
+                experts_vb.1.clone(),
+                None,
+                None,
+                None,
+            )),
+            None => None,
+        };
+        #[cfg(feature = "cuda")]
+        let experts_vb = cpu_experts.as_ref().unwrap_or(&experts_vb);
 
         match &experts_vb.0 {
             Either::Left(vb) => {
@@ -3333,6 +3355,34 @@ impl FusedMoeNvfp4 {
 
         let down_scales_swizzled = maybe_swizzle_nvfp4_scales(&down_scales)?;
 
+        // Move the host-loaded experts into offload banks; keep only GPU slot tensors here.
+        #[cfg(feature = "cuda")]
+        let (offload, gate_up, down_blocks, down_scales, down_global_scales, down_input_scales) =
+            match offload_dev {
+                Some(dev) => {
+                    let Nvfp4GateUpWeights::Fused(p) = gate_up else {
+                        candle_core::bail!("XINFER_MOE_OFFLOAD: separate NVFP4 gate/up is not supported");
+                    };
+                    let o = crate::models::layers::moe_offload::nvfp4::Nvfp4ExpertOffload::new(
+                        &dev,
+                        [p.blocks, p.scales, down_blocks, down_scales],
+                        [p.global_scales, p.input_scales, down_global_scales, down_input_scales],
+                        moe_cfg.num_experts_per_tok,
+                    )?;
+                    let w = o.slot_weights();
+                    let gate_up = Nvfp4GateUpWeights::Fused(Nvfp4Projection {
+                        blocks: w.gate_up_blocks,
+                        scales: w.gate_up_scales,
+                        global_scales: w.gate_up_global,
+                        input_scales: w.gate_up_input,
+                        scales_swizzled: None,
+                        half_scales: None,
+                    });
+                    (Some(o), gate_up, w.down_blocks, w.down_scales, w.down_global, w.down_input)
+                }
+                None => (None, gate_up, down_blocks, down_scales, down_global_scales, down_input_scales),
+            };
+
         Ok(Self {
             gate,
             gate_up,
@@ -3341,6 +3391,8 @@ impl FusedMoeNvfp4 {
             down_global_scales,
             down_input_scales,
             down_scales_swizzled,
+            #[cfg(feature = "cuda")]
+            offload,
             w_size_n,
             act: cfg.hidden_act,
             routing: MoeRouting::from_moe_cfg(moe_cfg, bias),
@@ -3394,12 +3446,37 @@ impl FusedMoeNvfp4 {
             xs
         };
 
+        #[cfg(feature = "cuda")]
+        let (topk_ids, offloaded) = match &self.offload {
+            Some(o) => {
+                let (ids, w) = o.prepare(topk_ids)?;
+                (ids, Some(w))
+            }
+            None => (topk_ids, None),
+        };
+        #[cfg(not(feature = "cuda"))]
+        let offloaded: Option<crate::models::layers::moe_offload::Nvfp4Weights> = None;
+
         let pre_sorted = presorted_expert_assignments(&topk_ids, is_prefill)?;
 
         let pre_sorted_refs = pre_sorted.as_ref().map(|(a, b)| (a, b));
 
-        let gate_up = match &self.gate_up {
-            Nvfp4GateUpWeights::Fused(projection) => moe::moe_gemm_nvfp4(
+        let gate_up = match (&offloaded, &self.gate_up) {
+            (Some(w), _) => moe::moe_gemm_nvfp4(
+                &xs,
+                &w.gate_up_blocks,
+                &w.gate_up_scales,
+                &w.gate_up_global,
+                Some(&w.gate_up_input),
+                None,
+                &topk_ids,
+                pre_sorted_refs,
+                is_prefill,
+                None,
+                None,
+                None,
+            )?,
+            (None, Nvfp4GateUpWeights::Fused(projection)) => moe::moe_gemm_nvfp4(
                 &xs,
                 &projection.blocks,
                 &projection.scales,
@@ -3413,7 +3490,7 @@ impl FusedMoeNvfp4 {
                 projection.scales_swizzled.as_ref(),
                 None,
             )?,
-            Nvfp4GateUpWeights::Separate { gate, up } => {
+            (None, Nvfp4GateUpWeights::Separate { gate, up }) => {
                 let gate_output = moe::moe_gemm_nvfp4(
                     &xs,
                     &gate.blocks,
@@ -3454,18 +3531,28 @@ impl FusedMoeNvfp4 {
             Some(&topk_weights)
         };
 
+        let (d_blocks, d_scales, d_global, d_input, d_swizzled) = match &offloaded {
+            Some(w) => (&w.down_blocks, &w.down_scales, &w.down_global, &w.down_input, None),
+            None => (
+                &self.down_blocks,
+                &self.down_scales,
+                &self.down_global_scales,
+                &self.down_input_scales,
+                self.down_scales_swizzled.as_ref(),
+            ),
+        };
         let mut ys = moe::moe_gemm_nvfp4(
             &down_inputs,
-            &self.down_blocks,
-            &self.down_scales,
-            &self.down_global_scales,
-            Some(&self.down_input_scales),
+            d_blocks,
+            d_scales,
+            d_global,
+            Some(d_input),
             None,
             &topk_ids,
             pre_sorted_refs,
             is_prefill,
             down_topk_weights,
-            self.down_scales_swizzled.as_ref(),
+            d_swizzled,
             None,
         )?
         .reshape((num_tokens, self.routing.num_experts_per_tok, hidden_dim))?
