@@ -1,0 +1,46 @@
+{
+  "env": {
+    "platform": "windows",
+    "os": "Windows-11-10.0.26100-SP0",
+    "cpu": "Intel64 Family 6 Model 79 Stepping 1, GenuineIntel",
+    "gpu": "NVIDIA GeForce RTX 3060, 12288 MiB, 610.88, 3, 16",
+    "binary": "F:\\Project\\Opensourse\\xinfer\\target\\release\\xinfer.exe",
+    "git": "81c7740",
+    "date": "2026-10-20 22:03"
+  },
+  "args": {
+    "bin": "F:\\Project\\Opensourse\\xinfer\\target\\release\\xinfer.exe",
+    "model": "F:/models/Qwen1.5-MoE-A2.7B-Chat",
+    "rates": "auto",
+    "mode": "server",
+    "prompt": "Explain in three sentences what a Mixture-of-Experts model is.",
+    "prompt_tokens": 0,
+    "max_tokens": 200,
+    "max_model_len": 8192,
+    "xinfer_args": "--isq q8_0 --kvcache-dtype fp8",
+    "timeout": 1200,
+    "out": "bench/qwen15moe_isq_q8_0_fp8_res1.5",
+    "keep_logs": true,
+    "needle": ""
+  },
+  "results": [
+    {
+      "cuda_graph": true,
+      "free_vram_gb": 2.02,
+      "kv_tokens": 14848.0,
+      "prefill_tps": 18.42,
+      "prompt_tokens": 35.0,
+      "response": "A Mixture-of-Experts model is a machine learning approach that combines multiple experts, or decision functions, to improve the overall performance of a model. Each expert specializes in a specific part of the input data and contributes its expertise to the final prediction. The model combines the predictions of these experts using a weighted sum, where the weights are learned during the training process. This approach allows for more flexible and robust modeling, especially when dealing with complex and diverse data.",
+      "ttft_ms": 1953.4831999917515,
+      "chunks": 92,
+      "decode_tps": 17.997648122725174,
+      "itl_p50_ms": 54.66189999424387,
+      "itl_p95_ms": 77.3648000031244,
+      "itl_p99_ms": 86.3649999955669,
+      "itl_max_ms": 86.60029999737162,
+      "rate": "auto",
+      "wall_s": 56.4,
+      "response_sha": "d7f8567151a0"
+    }
+  ]
+}

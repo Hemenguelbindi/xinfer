@@ -4,7 +4,8 @@
 
 use attention_rs::expert_cache::ExpertLru;
 use candle_core::cuda_backend::cudarc::driver::{result, DevicePtr};
-use candle_core::{CudaDevice, DType, Device, Result, Storage, Tensor};
+use candle_core::cuda_backend::CudaStorageSlice;
+use candle_core::{CudaDevice, Device, Result, Storage, Tensor};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::Instant;
@@ -104,22 +105,44 @@ impl SlotCache {
     }
 }
 
+/// CUDA device to offload onto when `XINFER_MOE_OFFLOAD` is set and supported here.
+pub fn offload_device(
+    vb: &crate::models::layers::VarBuilderX,
+    world_size: usize,
+) -> Result<Option<CudaDevice>> {
+    if crate::utils::env::moe_offload_rate().is_none() {
+        return Ok(None);
+    }
+    let Device::Cuda(dev) = vb.device() else {
+        candle_core::bail!("XINFER_MOE_OFFLOAD requires a CUDA device");
+    };
+    if world_size > 1 {
+        crate::log_warn!("XINFER_MOE_OFFLOAD is ignored with tensor parallelism (world_size > 1)");
+        return Ok(None);
+    }
+    Ok(Some(dev))
+}
+
 /// Async host->device copy on candle's stream, ordered with the kernels (pinned source).
 pub fn copy_htod(dev: &CudaDevice, dst: u64, src: &[u8]) -> Result<()> {
     unsafe { result::memcpy_htod_async(dst, src, *dev.cu_stream()) }
         .map_err(candle_core::Error::wrap)
 }
 
-/// Device address of a contiguous u8 or f32 CUDA tensor.
+/// Device address of a contiguous CUDA tensor of any dtype.
 pub fn dev_ptr(t: &Tensor) -> Result<u64> {
     let (storage, layout) = t.storage_and_layout();
     let Storage::Cuda(c) = &*storage else {
         candle_core::bail!("expected a CUDA tensor");
     };
-    let base = match t.dtype() {
-        DType::U8 => *c.as_cuda_slice::<u8>()?.device_ptr(),
-        DType::F32 => *c.as_cuda_slice::<f32>()?.device_ptr(),
-        dt => candle_core::bail!("unsupported dtype {dt:?}"),
+    let base = match &c.slice {
+        CudaStorageSlice::U8(s) => *s.device_ptr(),
+        CudaStorageSlice::U32(s) => *s.device_ptr(),
+        CudaStorageSlice::I64(s) => *s.device_ptr(),
+        CudaStorageSlice::BF16(s) => *s.device_ptr(),
+        CudaStorageSlice::F16(s) => *s.device_ptr(),
+        CudaStorageSlice::F32(s) => *s.device_ptr(),
+        CudaStorageSlice::F64(s) => *s.device_ptr(),
     };
     Ok(base + (layout.start_offset() * t.dtype().size_in_bytes()) as u64)
 }
@@ -181,6 +204,7 @@ pub fn profile_end(dev: &CudaDevice, begin: Option<Instant>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use candle_core::DType;
 
     fn slot_ids(p: Plan) -> Vec<u32> {
         match p {

@@ -39,9 +39,9 @@ pub fn staging_quant(
     })
 }
 
-/// Raw-byte (u8) staging buffer for weight `role` with shape `dims`.
-pub fn staging_bytes(dev: &CudaDevice, role: &str, dims: &[usize]) -> Result<Tensor> {
-    get_or_make(&BYTES, (role.to_string(), dims.to_vec()), || {
-        Tensor::zeros(dims, DType::U8, &Device::Cuda(dev.clone()))
+/// Staging buffer for weight `role` with shape `dims` and `dtype`.
+pub fn staging(dev: &CudaDevice, role: &str, dims: &[usize], dtype: DType) -> Result<Tensor> {
+    get_or_make(&BYTES, (format!("{role}/{dtype:?}"), dims.to_vec()), || {
+        Tensor::zeros(dims, dtype, &Device::Cuda(dev.clone()))
     })
 }

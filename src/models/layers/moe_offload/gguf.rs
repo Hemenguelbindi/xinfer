@@ -30,6 +30,8 @@ struct Inner {
 
 pub struct GgufExpertOffload(Arc<Inner>);
 
+const NAMES: [&str; 3] = ["ffn_gate_exps", "ffn_up_exps", "ffn_down_exps"];
+
 fn arr3<T>(v: Vec<T>) -> [T; 3] {
     v.try_into()
         .unwrap_or_else(|_| unreachable!("three expert weights"))
@@ -95,29 +97,67 @@ impl GgufExpertOffload {
         }
 
         let host = v.with_device(&Device::Cpu);
-        let names = ["ffn_gate_exps", "ffn_up_exps", "ffn_down_exps"];
         let dims = [
             [num_experts, i, h],
             [num_experts, i, h],
             [num_experts, h, i],
         ];
-        let (mut banks, mut shapes, mut staging) = (Vec::new(), Vec::new(), Vec::new());
+        let mut experts = Vec::with_capacity(3);
         for role in 0..3 {
-            let t = host.pp(names[role]).get(dims[role].to_vec(), "weight")?;
+            experts.push(host.pp(NAMES[role]).get(dims[role].to_vec(), "weight")?);
+        }
+        let offload = Self::new(dev, rate, &arr3(experts), moe_cfg.num_experts_per_tok)?;
+        host.clear_cache();
+        Ok(Some(offload))
+    }
+
+    /// Offload for ISQ experts quantized at load time (`[E, N, K]` gate, up, down; may
+    /// still be on the GPU). `None` unless `XINFER_MOE_OFFLOAD` applies here.
+    pub fn for_isq(
+        device: &Device,
+        world_size: usize,
+        experts: [&QTensor; 3],
+        topk: usize,
+    ) -> Result<Option<Self>> {
+        let Some(rate) = crate::utils::env::moe_offload_rate() else {
+            return Ok(None);
+        };
+        let Device::Cuda(dev) = device else {
+            candle_core::bail!("XINFER_MOE_OFFLOAD requires a CUDA device");
+        };
+        if world_size > 1 {
+            crate::log_warn!(
+                "XINFER_MOE_OFFLOAD is ignored with tensor parallelism (world_size > 1)"
+            );
+            return Ok(None);
+        }
+        Self::new(dev, rate, &experts, topk).map(Some)
+    }
+
+    fn new<T: std::borrow::Borrow<QTensor>>(
+        dev: &CudaDevice,
+        rate: f32,
+        experts: &[T; 3],
+        topk: usize,
+    ) -> Result<Self> {
+        let (mut banks, mut shapes, mut staging) = (Vec::new(), Vec::new(), Vec::new());
+        let num_experts = experts[0].borrow().shape().dims3()?.0;
+        for (role, t) in experts.iter().enumerate() {
+            let t = t.borrow();
+            let (e, n, k) = t.shape().dims3()?;
             if !crate::models::layers::moe::moe_gemm_gguf_supports(t.dtype()) {
                 candle_core::bail!(
                     "XINFER_MOE_OFFLOAD: {} dtype {:?} needs requantization, not supported yet",
-                    names[role],
+                    NAMES[role],
                     t.dtype()
                 );
             }
-            banks.push(HostBank::new(dev, &t.data()?, num_experts)?);
-            shapes.push((dims[role][1], dims[role][2], t.dtype()));
-            staging.push(staging_quant(dev, names[role], t.dtype(), &dims[role])?);
+            banks.push(HostBank::new(dev, &t.data()?, e)?);
+            shapes.push((n, k, t.dtype()));
+            staging.push(staging_quant(dev, NAMES[role], t.dtype(), &[e, n, k])?);
         }
-        host.clear_cache();
         let shapes = arr3(shapes);
-        let num_slots = SlotCache::slots_for(rate, num_experts, moe_cfg.num_experts_per_tok);
+        let num_slots = SlotCache::slots_for(rate, num_experts, topk);
         let slots = make_slots(dev, num_experts, &shapes, num_slots)?;
         let inner = Arc::new(Inner {
             dev: dev.clone(),
@@ -128,21 +168,21 @@ impl GgufExpertOffload {
             slots: RwLock::new(slots),
         });
         register(inner.clone());
-        Ok(Some(Self(inner)))
+        Ok(Self(inner))
     }
 
     /// One-block stand-ins for the layer's expert fields: unused while offloaded
     /// (forward reads `prepare`), and tiny so a later slot resize frees the old slots.
     pub fn placeholders(&self) -> Result<(Arc<QTensor>, Arc<QTensor>, Arc<QTensor>)> {
-        let one = |i: usize| -> Result<Arc<QTensor>> {
-            let dtype = self.0.shapes[i].2;
-            let st = QCudaStorage::zeros(&self.0.dev, dtype.block_size(), dtype)?;
-            Ok(Arc::new(QTensor::new(
-                QStorage::Cuda(st),
-                (1, 1, dtype.block_size()),
-            )?))
-        };
+        let one = |i: usize| self.placeholder(i).map(Arc::new);
         Ok((one(0)?, one(1)?, one(2)?))
+    }
+
+    /// One-block stand-in for expert weight `i` (gate, up, down).
+    pub fn placeholder(&self, i: usize) -> Result<QTensor> {
+        let dtype = self.0.shapes[i].2;
+        let st = QCudaStorage::zeros(&self.0.dev, dtype.block_size(), dtype)?;
+        QTensor::new(QStorage::Cuda(st), (1, 1, dtype.block_size()))
     }
 
     /// Makes the routed experts resident. Returns the ids to use (slot ids, or the

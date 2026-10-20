@@ -45,11 +45,20 @@ MTP (`--num-speculative-tokens`) works but was slower in our tests.
 
 ## Supported
 
-- Formats: GGUF (`FusedMoeGGUF`, separate `ffn_gate_exps`/`ffn_up_exps`, quant
-  types the GGUF MoE kernel reads natively) and NVFP4 ModelOpt safetensors
-  (`FusedMoeNvfp4`).
+- Formats:
+  - GGUF (`FusedMoeGGUF`, separate `ffn_gate_exps`/`ffn_up_exps`, quant types the
+    GGUF MoE kernel reads natively) and ISQ (`--isq`, `FusedMoeISQ`: experts are
+    quantized on the GPU at load, then moved to host RAM);
+  - NVFP4 ModelOpt safetensors (`FusedMoeNvfp4`);
+  - unquantized bf16/f16 (`FusedMoe`), block FP8 (`FusedMoeFp8`), MXFP4
+    (`FusedMoeMxfp4`) and GPTQ/AWQ/compressed-tensors WNA16 (`FusedMoeWNA16`): all
+    share one generic path that keeps every `[E, ...]` expert tensor (weights and
+    scales, any dtype) in host RAM.
+- Not supported: W2-packed DeepSeek-V4 experts (fails with a clear error).
 - Single GPU (`world_size == 1`), CUDA. NVFP4 on SM100+ (swizzled scales) is not
   supported yet.
+- Tested on real models: GGUF, NVFP4, bf16 and ISQ. FP8, MXFP4 and WNA16 are
+  covered by the generic path's bit-exact GEMM test only.
 - Host RAM must hold every expert (pinned).
 
 ## Benchmarks
@@ -90,5 +99,21 @@ needle is found. Greedy output is byte-identical for every GPU fraction.
 (27k / 16k KV tokens); with `fp8` at 10% → 18.9 tok/s.
 **GLM-4.7-Flash NVFP4** (20.5 GB, no CUDA graphs in xinfer for this model):
 10% / 20% → 10.8 / 11.2 tok/s. Outputs identical across fractions for both.
+
+**Qwen1.5-MoE-A2.7B-Chat bf16** (28.6 GB, 60 experts of 17 MB each), `auto` with
+`XINFER_MOE_OFFLOAD_RESERVE_GB=1.5`:
+
+| Experts | KV dtype | GPU experts | KV tokens | TTFT | Decode tok/s | Inter-token p50 / p99 ms |
+|---|---|---|---|---|---|---|
+| bf16 | fp8 | auto (~15%) | 8.4k | 2.5 s | 7.9 | 131 / 168 |
+| bf16 | turbo4 | auto (~15%) | 12.5k | 2.4 s | 8.1 | 126 / 158 |
+| ISQ `q8_0` | fp8 | auto (40%) | 14.8k | 1.9 s | 18.0 | 55 / 86 |
+| ISQ `q8_0` | turbo4 | auto (40%) | 27.1k | 1.9 s | 20.5 | 49 / 74 |
+
+bf16 experts are PCIe-bound (~1.4 GB of misses per token over PCIe 3.0);
+`--isq q8_0` halves the expert size and fits 2.7x more experts on the GPU, so
+decode is 2.5x faster. Q4K needs `moe_intermediate_size % 256 == 0` (1408 here)
+and the GGUF MoE kernel has no Q4_0, so 4-bit ISQ is not available for this
+model. bf16 greedy output is identical at 10% and auto (~15%).
 
 Run-to-run variation on this machine is about ±10%.

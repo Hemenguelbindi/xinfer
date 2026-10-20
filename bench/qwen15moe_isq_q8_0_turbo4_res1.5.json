@@ -1,0 +1,46 @@
+{
+  "env": {
+    "platform": "windows",
+    "os": "Windows-11-10.0.26100-SP0",
+    "cpu": "Intel64 Family 6 Model 79 Stepping 1, GenuineIntel",
+    "gpu": "NVIDIA GeForce RTX 3060, 12288 MiB, 610.88, 3, 16",
+    "binary": "F:\\Project\\Opensourse\\xinfer\\target\\release\\xinfer.exe",
+    "git": "81c7740",
+    "date": "2026-10-20 22:02"
+  },
+  "args": {
+    "bin": "F:\\Project\\Opensourse\\xinfer\\target\\release\\xinfer.exe",
+    "model": "F:/models/Qwen1.5-MoE-A2.7B-Chat",
+    "rates": "auto",
+    "mode": "server",
+    "prompt": "Explain in three sentences what a Mixture-of-Experts model is.",
+    "prompt_tokens": 0,
+    "max_tokens": 200,
+    "max_model_len": 8192,
+    "xinfer_args": "--isq q8_0 --kvcache-dtype turbo4",
+    "timeout": 1200,
+    "out": "bench/qwen15moe_isq_q8_0_turbo4_res1.5",
+    "keep_logs": true,
+    "needle": ""
+  },
+  "results": [
+    {
+      "cuda_graph": true,
+      "free_vram_gb": 1.96,
+      "kv_tokens": 27072.0,
+      "prefill_tps": 18.61,
+      "prompt_tokens": 35.0,
+      "response": "A Mixture-of-Experts (MoE) model is a machine learning architecture that combines multiple experts, or specialized neural networks, to make predictions. Each expert processes a portion of the input data and contributes a portion of the final output. The outputs of the experts are then combined, typically through weighted averaging, to produce the final prediction. This approach allows for better utilization of domain knowledge and can improve the model's performance by leveraging the strengths of multiple simpler models.",
+      "ttft_ms": 1934.008399999584,
+      "chunks": 93,
+      "decode_tps": 20.50464425735926,
+      "itl_p50_ms": 49.33789999631699,
+      "itl_p95_ms": 71.10169999941718,
+      "itl_p99_ms": 73.92349999281578,
+      "itl_max_ms": 79.67310000094585,
+      "rate": "auto",
+      "wall_s": 58.3,
+      "response_sha": "fd18f475faa2"
+    }
+  ]
+}

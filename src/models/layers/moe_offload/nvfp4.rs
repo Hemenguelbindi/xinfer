@@ -6,7 +6,7 @@
 use super::budget::{register, SlotPool};
 use super::cache::{copy_htod, dev_ptr, profile_begin, profile_end, Plan, SlotCache};
 use super::host_banks::HostBank;
-use super::prefill::staging_bytes;
+use super::prefill;
 use super::Nvfp4Weights;
 use crate::models::layers::VarBuilderX;
 use candle_core::{CudaDevice, DType, Device, Result, Tensor};
@@ -49,16 +49,9 @@ fn arr4<T>(v: Vec<T>) -> [T; 4] {
 
 /// CUDA device to offload onto when `XINFER_MOE_OFFLOAD` is set and supported here.
 pub fn offload_device(vb: &VarBuilderX, world_size: usize) -> Result<Option<CudaDevice>> {
-    if crate::utils::env::moe_offload_rate().is_none() {
+    let Some(dev) = super::cache::offload_device(vb, world_size)? else {
         return Ok(None);
-    }
-    let Device::Cuda(dev) = vb.device() else {
-        candle_core::bail!("XINFER_MOE_OFFLOAD requires a CUDA device");
     };
-    if world_size > 1 {
-        crate::log_warn!("XINFER_MOE_OFFLOAD is ignored with tensor parallelism (world_size > 1)");
-        return Ok(None);
-    }
     if attention_rs::cuda_utils::sm_version(&dev).unwrap_or(0) >= 100 {
         candle_core::bail!(
             "XINFER_MOE_OFFLOAD: NVFP4 swizzled scales (SM100+) are not supported yet"
@@ -132,7 +125,7 @@ impl Nvfp4ExpertOffload {
                 &t.flatten_all()?.to_vec1::<u8>()?,
                 num_experts,
             )?);
-            staging.push(staging_bytes(dev, role, t.dims())?);
+            staging.push(prefill::staging(dev, role, t.dims(), DType::U8)?);
             big_dims.push(t.dims().to_vec());
         }
         let full_vecs = arr4(

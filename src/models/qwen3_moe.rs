@@ -186,7 +186,12 @@ impl Qwen3DecoderLayer {
                                 .reshape((1, config.hidden_size))?
                         }
                     }
-                    .to_dtype(dtype)?;
+                    // Hidden states are F32 with GGUF/ISQ (see `embed_forward`).
+                    .to_dtype(if is_qvar_builder || config.quant.is_some() {
+                        DType::F32
+                    } else {
+                        dtype
+                    })?;
 
                     let shared_gate = Linear::new(ws, None, &None)?;
 

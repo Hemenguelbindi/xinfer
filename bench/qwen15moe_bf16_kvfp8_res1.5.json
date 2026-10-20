@@ -1,0 +1,46 @@
+{
+  "env": {
+    "platform": "windows",
+    "os": "Windows-11-10.0.26100-SP0",
+    "cpu": "Intel64 Family 6 Model 79 Stepping 1, GenuineIntel",
+    "gpu": "NVIDIA GeForce RTX 3060, 12288 MiB, 610.88, 3, 16",
+    "binary": "F:\\Project\\Opensourse\\xinfer\\target\\release\\xinfer.exe",
+    "git": "81c7740",
+    "date": "2026-10-20 21:42"
+  },
+  "args": {
+    "bin": "F:\\Project\\Opensourse\\xinfer\\target\\release\\xinfer.exe",
+    "model": "F:/models/Qwen1.5-MoE-A2.7B-Chat",
+    "rates": "auto",
+    "mode": "server",
+    "prompt": "Explain in three sentences what a Mixture-of-Experts model is.",
+    "prompt_tokens": 0,
+    "max_tokens": 200,
+    "max_model_len": 8192,
+    "xinfer_args": "--kvcache-dtype fp8",
+    "timeout": 1200,
+    "out": "bench/qwen15moe_bf16_kvfp8_res1.5",
+    "keep_logs": true,
+    "needle": ""
+  },
+  "results": [
+    {
+      "cuda_graph": true,
+      "free_vram_gb": 1.28,
+      "kv_tokens": 8448.0,
+      "prefill_tps": 14.6,
+      "prompt_tokens": 35.0,
+      "response": "A Mixture-of-Experts model is a machine learning architecture that combines multiple experts, or individual functions, to improve the performance of a model on a specific task. Each expert is trained to handle a particular subset of the data or a specific aspect of the task, and the final output is a weighted sum of the outputs of all the experts. This approach is useful when the data is heterogeneous or has different characteristics that cannot be handled by a single expert. The weights of the experts are learned during the training phase, allowing the model to adapt to the data and improve its generalization ability.",
+      "ttft_ms": 2471.755700011272,
+      "chunks": 118,
+      "decode_tps": 7.877225111589233,
+      "itl_p50_ms": 130.5006000038702,
+      "itl_p95_ms": 157.7051000058418,
+      "itl_p99_ms": 167.73729999840725,
+      "itl_max_ms": 172.10159999376629,
+      "rate": "auto",
+      "wall_s": 113.3,
+      "response_sha": "e688775932e8"
+    }
+  ]
+}
