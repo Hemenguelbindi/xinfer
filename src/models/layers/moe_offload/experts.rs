@@ -105,10 +105,8 @@ impl<const N: usize> ExpertOffload<N> {
     /// Moves `weights` (`[E, ...]` each, typically host tensors) into pinned host banks.
     /// Returns the offload and empty GPU stand-ins for the layer's expert fields: unused
     /// while offloaded (forward reads `prepare`), so a later slot resize frees the old slots.
-    pub fn new(device: &Device, weights: [Tensor; N], topk: usize) -> Result<(Self, [Tensor; N])> {
-        let Device::Cuda(dev) = device else {
-            candle_core::bail!("XINFER_MOE_OFFLOAD requires a CUDA device");
-        };
+    pub fn new(dev: &CudaDevice, weights: [Tensor; N], topk: usize) -> Result<(Self, [Tensor; N])> {
+        let device = Device::Cuda(dev.clone());
         let rate = crate::utils::env::moe_offload_rate().expect("offload enabled");
         let num_experts = weights[0].dim(0)?;
         let (mut banks, mut shapes, mut staging) = (Vec::new(), Vec::new(), Vec::new());
@@ -136,7 +134,7 @@ impl<const N: usize> ExpertOffload<N> {
         )?;
         let empty = arr(shapes
             .iter()
-            .map(|(_, dtype)| Tensor::zeros(0, *dtype, device))
+            .map(|(_, dtype)| Tensor::zeros(0, *dtype, &device))
             .collect::<Result<Vec<_>>>()?);
         let inner = Arc::new(Inner {
             dev: dev.clone(),
@@ -184,9 +182,10 @@ mod tests {
 
     #[test]
     fn offloaded_moe_gemm_matches_resident_weights() -> Result<()> {
-        let Ok(gpu) = Device::new_cuda(0) else {
+        let Ok(Device::Cuda(dev)) = Device::new_cuda(0) else {
             return Ok(());
         };
+        let gpu = Device::Cuda(dev.clone());
         // 8 experts, 4 slots: decode steps hit, miss and evict; the prefill call stages.
         std::env::set_var(crate::utils::env::MOE_OFFLOAD_ENV, "0.5");
         let (e, n, k, topk) = (8, 64, 64, 2);
@@ -194,7 +193,7 @@ mod tests {
             Tensor::randn(0f32, 1.0, (e, 2 * n, k), &Device::Cpu)?.to_dtype(DType::BF16)?;
         let down = Tensor::randn(0f32, 1.0, (e, k, n), &Device::Cpu)?.to_dtype(DType::BF16)?;
         let full = [gate_up.to_device(&gpu)?, down.to_device(&gpu)?];
-        let (o, _) = ExpertOffload::new(&gpu, [gate_up, down], topk)?;
+        let (o, _) = ExpertOffload::new(&dev, [gate_up, down], topk)?;
 
         // As in `FusedMoe::forward_with_routing`: gate_up without, down with routing weights.
         let run = |w: &Tensor, x: &Tensor, ids: &Tensor, prefill: bool| -> Result<Vec<Vec<f32>>> {

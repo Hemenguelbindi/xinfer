@@ -72,8 +72,8 @@ python3 bench/bench_moe_offload.py --bin target/release/xinfer \
 
 It runs the OpenAI-compatible server, sends a warm-up and one streamed request
 (greedy) and records time to first token, decode speed and inter-token latency
-percentiles; `--prompt-tokens N` adds a long-context needle test. Full tables
-and logs: [`bench/`](../bench/).
+percentiles; `--prompt-tokens N` adds a long-context needle test. It writes a
+Markdown table and the raw JSON next to `--out` (not committed).
 
 RTX 3060 12 GB, PCIe 3.0 x16, Xeon E5-2650 v4, 64 GB DDR4-2400, Windows 11,
 200 decoded tokens, `--max-model-len 8192`. Without offload none of these

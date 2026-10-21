@@ -1,7 +1,8 @@
 // src/models/layers/moe.rs
 use crate::models::layers::distributed::{shard, AllReduce, Comm};
 use crate::models::layers::linear::{linear_no_bias_x as linear_no_bias, LinearX as Linear};
-use crate::models::layers::moe_offload::{host_experts_vb, ExpertOffload};
+#[cfg(feature = "cuda")]
+use crate::models::layers::moe_offload::{cache::offload_device, host_experts_vb, ExpertOffload};
 use crate::models::layers::{isq_high_precision_dtype, VarBuilderX};
 use crate::utils::config::Config;
 use crate::utils::config::QuantConfig;
@@ -175,33 +176,36 @@ pub(crate) fn sort_expert_assignments(
     }
 }
 
-/// The ids and expert tensors one MoE call reads: the offload slots
-/// (`XINFER_MOE_OFFLOAD`) or the layer's resident tensors.
-fn routed_experts<const N: usize>(
-    offload: &Option<ExpertOffload<N>>,
-    topk_ids: Tensor,
-    is_prefill: bool,
-    resident: [&Tensor; N],
-) -> Result<(Tensor, [Tensor; N])> {
-    match offload {
-        Some(o) => o.prepare(topk_ids, is_prefill),
-        None => Ok((topk_ids, resident.map(Tensor::clone))),
-    }
-}
-
-/// With offload on (`host`: experts were loaded into host RAM), moves the expert
-/// tensors into an `ExpertOffload`; the layer keeps the returned empty stand-ins.
+/// `XINFER_MOE_OFFLOAD`: moves the host-loaded expert tensors into an `ExpertOffload`;
+/// the layer keeps the returned empty stand-ins. Without `dev` the weights pass through.
+#[cfg(feature = "cuda")]
 fn offload_experts<const N: usize>(
-    host: bool,
-    device: &candle_core::Device,
+    dev: Option<candle_core::CudaDevice>,
     weights: [Tensor; N],
     topk: usize,
 ) -> Result<(Option<ExpertOffload<N>>, [Tensor; N])> {
-    if !host {
+    let Some(dev) = dev else {
         return Ok((None, weights));
-    }
-    let (o, empty) = ExpertOffload::new(device, weights, topk)?;
+    };
+    let (o, empty) = ExpertOffload::new(&dev, weights, topk)?;
     Ok((Some(o), empty))
+}
+
+/// `XINFER_MOE_OFFLOAD`: makes the routed experts resident and returns the slot ids and
+/// slot tensors to read instead of the layer's own; `None` leaves the call untouched.
+#[cfg(feature = "cuda")]
+fn offloaded_experts<const N: usize>(
+    offload: &Option<ExpertOffload<N>>,
+    topk_ids: Tensor,
+    is_prefill: bool,
+) -> Result<(Tensor, Option<[Tensor; N]>)> {
+    match offload {
+        Some(o) => {
+            let (ids, w) = o.prepare(topk_ids, is_prefill)?;
+            Ok((ids, Some(w)))
+        }
+        None => Ok((topk_ids, None)),
+    }
 }
 
 fn presorted_expert_assignments(
@@ -372,6 +376,7 @@ pub struct FusedMoe {
     world_size: usize,
     dtype: DType,
     gate_dtype: DType,
+    #[cfg(feature = "cuda")]
     offload: Option<ExpertOffload<2>>,
 }
 
@@ -569,20 +574,22 @@ This usually means packed down_proj / gate_up_proj layout was interpreted incorr
             gate_dtype,
         )?;
 
-        // Offload loads the experts into host RAM, then into the offload banks.
-        let device = experts_vb.device();
-        let host_vb = host_experts_vb(&experts_vb, comm.world_size())?;
-        let (gate_w, up_w, down_w) = Self::load_packed(
-            cfg,
-            host_vb.clone().unwrap_or_else(|| experts_vb.clone()),
-            comm.clone(),
-        )?;
+        // XINFER_MOE_OFFLOAD: load the experts into host RAM, then into the offload banks.
+        #[cfg(feature = "cuda")]
+        let offload_dev = offload_device(&experts_vb, comm.world_size())?;
+        #[cfg(feature = "cuda")]
+        let (gate_w, up_w, down_w) = match &offload_dev {
+            Some(_) => Self::load_packed(cfg, host_experts_vb(&experts_vb)?, comm.clone())?,
+            None => Self::load_packed(cfg, experts_vb, comm.clone())?,
+        };
+        #[cfg(not(feature = "cuda"))]
+        let (gate_w, up_w, down_w) = Self::load_packed(cfg, experts_vb, comm.clone())?;
         let gate_up_w = Tensor::cat(&[&gate_w, &up_w], 1)?;
         let world_size = comm.world_size();
         let w_size_n = gate_up_w.dim(1)? / 2;
+        #[cfg(feature = "cuda")]
         let (offload, [gate_up_w, down_w]) = offload_experts(
-            host_vb.is_some(),
-            &device,
+            offload_dev,
             [gate_up_w, down_w],
             moe_cfg.num_experts_per_tok,
         )?;
@@ -601,6 +608,7 @@ This usually means packed down_proj / gate_up_proj layout was interpreted incorr
             world_size,
             dtype,
             gate_dtype,
+            #[cfg(feature = "cuda")]
             offload,
         })
     }
@@ -626,19 +634,21 @@ This usually means packed down_proj / gate_up_proj layout was interpreted incorr
     ) -> Result<Tensor> {
         let (num_tokens, hidden_dim) = xs.dims2()?;
 
-        let (topk_ids, [gate_up_w, down_w]) = routed_experts(
-            &self.offload,
-            topk_ids,
-            is_prefill,
-            [&self.gate_up_w, &self.down_w],
-        )?;
+        #[cfg(feature = "cuda")]
+        let (topk_ids, offloaded) = offloaded_experts(&self.offload, topk_ids, is_prefill)?;
+        #[cfg(not(feature = "cuda"))]
+        let offloaded: Option<[Tensor; 2]> = None;
+        let [gate_up_w, down_w] = match &offloaded {
+            Some([gate_up_w, down_w]) => [gate_up_w, down_w],
+            None => [&self.gate_up_w, &self.down_w],
+        };
 
         let (expert_ids, sorted_token_ids) = sort_expert_assignments(&topk_ids, is_prefill)?;
 
         let topk = self.routing.num_experts_per_tok;
         let gate_up = moe::moe_gemm(
             &xs,
-            &gate_up_w,
+            gate_up_w,
             &None,
             &sorted_token_ids,
             &expert_ids,
@@ -650,7 +660,7 @@ This usually means packed down_proj / gate_up_proj layout was interpreted incorr
 
         let mut ys = moe::moe_gemm(
             &down_inputs,
-            &down_w,
+            down_w,
             &Some(topk_weights),
             &sorted_token_ids,
             &expert_ids,
@@ -690,6 +700,7 @@ pub struct FusedMoeWNA16 {
     group_size: usize,
     gate_dtype: DType,
     legacy_gptq: bool,
+    #[cfg(feature = "cuda")]
     offload: Option<ExpertOffload<4>>,
 }
 
@@ -767,9 +778,15 @@ impl FusedMoeWNA16 {
             gate_dtype,
         )?;
 
-        // Offload loads the experts into host RAM, then into the offload banks.
-        let device = experts_vb.device();
-        let host_vb = host_experts_vb(&experts_vb, comm.world_size())?;
+        // XINFER_MOE_OFFLOAD: load the experts into host RAM, then into the offload banks.
+        #[cfg(feature = "cuda")]
+        let offload_dev = offload_device(&experts_vb, comm.world_size())?;
+        #[cfg(feature = "cuda")]
+        let host_vb = offload_dev
+            .as_ref()
+            .map(|_| host_experts_vb(&experts_vb))
+            .transpose()?;
+        #[cfg(feature = "cuda")]
         let experts_vb = host_vb.as_ref().unwrap_or(&experts_vb);
 
         let mut gate_weights = Vec::with_capacity(num_experts);
@@ -946,10 +963,10 @@ impl FusedMoeWNA16 {
         let down_packed = Tensor::stack(&down_weights, 0)?.contiguous()?;
         let down_scales = Tensor::stack(&down_scales, 0)?.contiguous()?;
         let w_size_n = gate_up_packed.dim(1)? / 2;
+        #[cfg(feature = "cuda")]
         let (offload, [gate_up_packed, gate_up_scales, down_packed, down_scales]) =
             offload_experts(
-                host_vb.is_some(),
-                &device,
+                offload_dev,
                 [gate_up_packed, gate_up_scales, down_packed, down_scales],
                 moe_cfg.num_experts_per_tok,
             )?;
@@ -973,6 +990,7 @@ impl FusedMoeWNA16 {
             group_size,
             gate_dtype,
             legacy_gptq,
+            #[cfg(feature = "cuda")]
             offload,
         })
     }
@@ -997,23 +1015,25 @@ impl FusedMoeWNA16 {
         is_prefill: bool,
     ) -> Result<Tensor> {
         let (num_tokens, hidden_dim) = xs.dims2()?;
-        let (topk_ids, [gate_up_p, gate_up_s, down_p, down_s]) = routed_experts(
-            &self.offload,
-            topk_ids,
-            is_prefill,
-            [
+        #[cfg(feature = "cuda")]
+        let (topk_ids, offloaded) = offloaded_experts(&self.offload, topk_ids, is_prefill)?;
+        #[cfg(not(feature = "cuda"))]
+        let offloaded: Option<[Tensor; 4]> = None;
+        let [gate_up_p, gate_up_s, down_p, down_s] = match &offloaded {
+            Some([gate_up_p, gate_up_s, down_p, down_s]) => [gate_up_p, gate_up_s, down_p, down_s],
+            None => [
                 &self.gate_up_packed,
                 &self.gate_up_scales,
                 &self.down_packed,
                 &self.down_scales,
             ],
-        )?;
+        };
         let (expert_ids, sorted_token_ids) = sort_expert_assignments(&topk_ids, is_prefill)?;
 
         let gate_up = moe::moe_gemm_wna16(
             xs,
-            &gate_up_p,
-            &gate_up_s,
+            gate_up_p,
+            gate_up_s,
             &None,
             &sorted_token_ids,
             &expert_ids,
@@ -1026,8 +1046,8 @@ impl FusedMoeWNA16 {
         let down_inputs = gated_activation(&gate_up, self.w_size_n, &self.act)?;
         let mut ys = moe::moe_gemm_wna16(
             &down_inputs,
-            &down_p,
-            &down_s,
+            down_p,
+            down_s,
             &Some(topk_weights),
             &sorted_token_ids,
             &expert_ids,
@@ -2249,6 +2269,7 @@ pub struct FusedMoeFp8 {
     dtype: DType,
     block_size: Vec<usize>,
     gate_dtype: DType,
+    #[cfg(feature = "cuda")]
     offload: Option<ExpertOffload<4>>,
 }
 
@@ -2293,9 +2314,15 @@ impl FusedMoeFp8 {
         let by = block_size[0]; // for scale_n
         let bx = block_size[1]; // for scale_k
 
-        // Offload loads the experts into host RAM, then into the offload banks.
-        let device = experts_vb.device();
-        let host_vb = host_experts_vb(&experts_vb, comm.world_size())?;
+        // XINFER_MOE_OFFLOAD: load the experts into host RAM, then into the offload banks.
+        #[cfg(feature = "cuda")]
+        let offload_dev = offload_device(&experts_vb, comm.world_size())?;
+        #[cfg(feature = "cuda")]
+        let host_vb = offload_dev
+            .as_ref()
+            .map(|_| host_experts_vb(&experts_vb))
+            .transpose()?;
+        #[cfg(feature = "cuda")]
         let experts_vb = host_vb.as_ref().unwrap_or(&experts_vb);
 
         let gate_dtype = if cfg.higher_precision_required() {
@@ -2503,10 +2530,10 @@ impl FusedMoeFp8 {
         let gate_up_experts = Tensor::cat(&[&gate_experts, &up_experts], 1)?;
         let gate_up_experts_scale = Tensor::cat(&[&gate_experts_scale, &up_experts_scale], 1)?;
         let w_size_n = gate_up_experts.dim(1)? / 2;
+        #[cfg(feature = "cuda")]
         let (offload, [gate_up_experts, gate_up_experts_scale, down_experts, down_experts_scale]) =
             offload_experts(
-                host_vb.is_some(),
-                &device,
+                offload_dev,
                 [
                     gate_up_experts,
                     gate_up_experts_scale,
@@ -2533,6 +2560,7 @@ impl FusedMoeFp8 {
             dtype,
             block_size: vec![by, bx],
             gate_dtype,
+            #[cfg(feature = "cuda")]
             offload,
         })
     }
@@ -2553,23 +2581,25 @@ impl FusedMoeFp8 {
             xs.clone()
         };
 
-        let (topk_ids, [gate_up_w, gate_up_s, down_w, down_s]) = routed_experts(
-            &self.offload,
-            topk_ids,
-            is_prefill,
-            [
+        #[cfg(feature = "cuda")]
+        let (topk_ids, offloaded) = offloaded_experts(&self.offload, topk_ids, is_prefill)?;
+        #[cfg(not(feature = "cuda"))]
+        let offloaded: Option<[Tensor; 4]> = None;
+        let [gate_up_w, gate_up_s, down_w, down_s] = match &offloaded {
+            Some([gate_up_w, gate_up_s, down_w, down_s]) => [gate_up_w, gate_up_s, down_w, down_s],
+            None => [
                 &self.gate_up_experts,
                 &self.gate_up_experts_scale,
                 &self.down_experts,
                 &self.down_experts_scale,
             ],
-        )?;
+        };
         let (expert_ids, sorted_token_ids) = sort_expert_assignments(&topk_ids, is_prefill)?;
 
         let gate_up = moe_gemm_fp8(
             &xs,
-            &gate_up_w,
-            &gate_up_s,
+            gate_up_w,
+            gate_up_s,
             &None,
             &sorted_token_ids,
             &expert_ids,
@@ -2583,8 +2613,8 @@ impl FusedMoeFp8 {
 
         let mut ys = moe_gemm_fp8(
             &down_inputs,
-            &down_w,
-            &down_s,
+            down_w,
+            down_s,
             &Some(topk_weights),
             &sorted_token_ids,
             &expert_ids,
@@ -2617,6 +2647,7 @@ pub struct FusedMoeMxfp4 {
     world_size: usize,
     dtype: DType,
     gate_dtype: DType,
+    #[cfg(feature = "cuda")]
     offload: Option<ExpertOffload<4>>,
 }
 
@@ -2693,9 +2724,15 @@ impl FusedMoeMxfp4 {
             gate_dtype,
         )?;
 
-        // Offload loads the experts into host RAM, then into the offload banks.
-        let device = experts_vb.device();
-        let host_vb = host_experts_vb(&experts_vb, comm.world_size())?;
+        // XINFER_MOE_OFFLOAD: load the experts into host RAM, then into the offload banks.
+        #[cfg(feature = "cuda")]
+        let offload_dev = offload_device(&experts_vb, comm.world_size())?;
+        #[cfg(feature = "cuda")]
+        let host_vb = offload_dev
+            .as_ref()
+            .map(|_| host_experts_vb(&experts_vb))
+            .transpose()?;
+        #[cfg(feature = "cuda")]
         let experts_vb = host_vb.as_ref().unwrap_or(&experts_vb);
 
         let mut gate_blocks_vec = Vec::new();
@@ -2784,10 +2821,10 @@ impl FusedMoeMxfp4 {
 
         let down_blocks = Tensor::stack(&down_blocks_vec, 0)?;
         let down_scales = Tensor::stack(&down_scales_vec, 0)?;
+        #[cfg(feature = "cuda")]
         let (offload, [gate_up_blocks, gate_up_scales, down_blocks, down_scales]) =
             offload_experts(
-                host_vb.is_some(),
-                &device,
+                offload_dev,
                 [gate_up_blocks, gate_up_scales, down_blocks, down_scales],
                 moe_cfg.num_experts_per_tok,
             )?;
@@ -2808,6 +2845,7 @@ impl FusedMoeMxfp4 {
             world_size: comm.world_size(),
             dtype,
             gate_dtype,
+            #[cfg(feature = "cuda")]
             offload,
         })
     }
@@ -2821,17 +2859,19 @@ impl FusedMoeMxfp4 {
         };
         let router_logits = self.gate.forward(&gate_input)?.to_dtype(DType::F32)?;
         let (topk_weights, topk_ids) = self.routing.route(&router_logits, is_prefill)?;
-        let (topk_ids, [gate_up_b, gate_up_s, down_b, down_s]) = routed_experts(
-            &self.offload,
-            topk_ids,
-            is_prefill,
-            [
+        #[cfg(feature = "cuda")]
+        let (topk_ids, offloaded) = offloaded_experts(&self.offload, topk_ids, is_prefill)?;
+        #[cfg(not(feature = "cuda"))]
+        let offloaded: Option<[Tensor; 4]> = None;
+        let [gate_up_b, gate_up_s, down_b, down_s] = match &offloaded {
+            Some([gate_up_b, gate_up_s, down_b, down_s]) => [gate_up_b, gate_up_s, down_b, down_s],
+            None => [
                 &self.gate_up_blocks,
                 &self.gate_up_scales,
                 &self.down_blocks,
                 &self.down_scales,
             ],
-        )?;
+        };
 
         let moe_dtype = if self.dtype == DType::F32 {
             DType::BF16
@@ -2844,9 +2884,8 @@ impl FusedMoeMxfp4 {
             xs.clone()
         };
 
-        let gate_up = moe::moe_gemm_mxfp4(
-            &xs, &gate_up_b, &gate_up_s, None, &topk_ids, is_prefill, None,
-        )?;
+        let gate_up =
+            moe::moe_gemm_mxfp4(&xs, gate_up_b, gate_up_s, None, &topk_ids, is_prefill, None)?;
 
         let down_inputs = gated_activation(&gate_up, self.w_size_n, &self.act)?;
         let down_inputs = if down_inputs.dtype() != moe_dtype {
@@ -2857,8 +2896,8 @@ impl FusedMoeMxfp4 {
 
         let mut ys = moe::moe_gemm_mxfp4(
             &down_inputs,
-            &down_b,
-            &down_s,
+            down_b,
+            down_s,
             None,
             &topk_ids,
             is_prefill,
@@ -3942,6 +3981,7 @@ pub struct FusedMoeW2 {
 impl FusedMoeW2 {
     /// Pack MXFP4 experts into W2 planes, keeping the MXFP4 gate/routing.
     pub fn from_mxfp4(mx: FusedMoeMxfp4) -> Result<Self> {
+        #[cfg(feature = "cuda")]
         if mx.offload.is_some() {
             candle_core::bail!(
                 "XINFER_MOE_OFFLOAD does not support W2-packed (DeepSeek-V4) experts"
@@ -3976,6 +4016,7 @@ impl FusedMoeW2 {
                 world_size: mx.world_size,
                 dtype: mx.dtype,
                 gate_dtype: mx.gate_dtype,
+                #[cfg(feature = "cuda")]
                 offload: None,
             })
         } else {
