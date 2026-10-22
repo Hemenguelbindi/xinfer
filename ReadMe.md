@@ -78,6 +78,17 @@ xinfer --m Qwen/Qwen3.8-... --d 0,1 --ui-server \
 
 See [docs/speculative_decoding.md](docs/speculative_decoding.md) for details.
 
+### 🧩 MoE Expert Offloading
+
+MoE expert offloading is supported on CUDA only. Run a large MoE model with expert weights offloaded to host RAM. The value is a fraction: `0.2` keeps 20% of each layer's experts on the GPU; `auto` selects the cache size automatically. Tensor parallelism requires NCCL.
+
+```bash
+XINFER_MOE_OFFLOAD=0.2 xinfer \
+  --m Qwen/Qwen3.5-35B-A3B-FP8 --d 0,1 --ui-server
+```
+
+See the [MoE expert offloading guide](docs/moe_offload.md) for configuration and TP details.
+
 > **Tip:** Open `http://IP:8001` for the built-in chat UI, or use `http://IP:8000/v1/` as your API `Base URL`.
 
 ---
@@ -93,8 +104,6 @@ Add `--kvcache-dtype` to compress KV cache and extend context length:
 | `turbo8` | **2.6×** | 79–100% throughput | SM70+ / Apple M1|
 | `turbo4` | **3.7×** | Best balance | SM70+ / Apple M1|
 | `turbo3` | **4.7×** | Max compression | SM70+ |
-
----
 
 ## 📈 Performance
 

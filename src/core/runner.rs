@@ -457,6 +457,10 @@ impl ModelRunner {
             None
         };
 
+        // XINFER_MOE_OFFLOAD=auto: grow expert slots into free VRAM before the KV cache is sized.
+        #[cfg(feature = "cuda")]
+        crate::models::layers::moe_offload::budget::grow_to_free_vram()?;
+
         let allocator = if let Some(s) = stream {
             use crate::runner::{receive_local, send_local, MessageType};
             use interprocess::TryClone;

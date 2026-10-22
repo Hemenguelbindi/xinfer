@@ -82,6 +82,7 @@ impl ToolBuilder {
                 description: Some(self.description),
                 parameters: self.parameters,
                 strict: self.strict,
+                extra: Default::default(),
             },
         }
     }

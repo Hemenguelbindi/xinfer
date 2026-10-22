@@ -170,49 +170,55 @@ impl Qwen3DecoderLayer {
         };
 
         //shared experts weights in Qwen2 MoE models
-        let (shared_gate, shared_expert) =
-            if let Some(intermediate_size) = moe_cfg.shared_expert_intermediate_size {
-                if intermediate_size > 0 {
-                    let ws = match &vb.0 {
-                        Either::Left(vb) => vb
-                            .pp("mlp.shared_expert_gate")
-                            .get((1, config.hidden_size), "weight")?,
-                        Either::Right(vb) => {
-                            let ws = vb
-                                .pp("ffn_gate_inp_shexp")
-                                .get((config.hidden_size,), "weight")?;
-                            //weight must be 2d+
-                            ws.dequantize(&vb.device())?
-                                .reshape((1, config.hidden_size))?
-                        }
+        let (shared_gate, shared_expert) = if let Some(intermediate_size) =
+            moe_cfg.shared_expert_intermediate_size
+        {
+            if intermediate_size > 0 {
+                let ws = match &vb.0 {
+                    Either::Left(vb) => vb
+                        .pp("mlp.shared_expert_gate")
+                        .get((1, config.hidden_size), "weight")?,
+                    Either::Right(vb) => {
+                        let ws = vb
+                            .pp("ffn_gate_inp_shexp")
+                            .get((config.hidden_size,), "weight")?;
+                        //weight must be 2d+
+                        ws.dequantize(&vb.device())?
+                            .reshape((1, config.hidden_size))?
                     }
-                    .to_dtype(dtype)?;
-
-                    let shared_gate = Linear::new(ws, None, &None)?;
-
-                    let mlp = MLP::new(
-                        if is_qvar_builder {
-                            vb.clone()
-                        } else {
-                            vb.pp("mlp.shared_expert").clone()
-                        },
-                        comm.clone(),
-                        config.hidden_size,
-                        intermediate_size,
-                        &config.hidden_act,
-                        &config.quantization_config,
-                        &config.quant,
-                        false,
-                        dtype,
-                        if is_qvar_builder { "_shexp" } else { "" },
-                    )?;
-                    (Some(shared_gate), Some(mlp))
-                } else {
-                    (None, None)
                 }
+                // Hidden states are F32 with GGUF/ISQ (see `embed_forward`).
+                .to_dtype(if is_qvar_builder || config.quant.is_some() {
+                    DType::F32
+                } else {
+                    dtype
+                })?;
+
+                let shared_gate = Linear::new(ws, None, &None)?;
+
+                let mlp = MLP::new(
+                    if is_qvar_builder {
+                        vb.clone()
+                    } else {
+                        vb.pp("mlp.shared_expert").clone()
+                    },
+                    comm.clone(),
+                    config.hidden_size,
+                    intermediate_size,
+                    &config.hidden_act,
+                    &config.quantization_config,
+                    &config.quant,
+                    false,
+                    dtype,
+                    if is_qvar_builder { "_shexp" } else { "" },
+                )?;
+                (Some(shared_gate), Some(mlp))
             } else {
                 (None, None)
-            };
+            }
+        } else {
+            (None, None)
+        };
 
         let key_map: HashMap<&str, &str> = [
             ("input_layernorm", "attn_norm"),

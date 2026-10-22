@@ -108,8 +108,17 @@ fn run_dense(
     let input = Tensor::from_vec(f32_values(m * k, m + n), (m, k), device)?.to_dtype(dtype)?;
     let w = weight.narrow(0, 0, 1)?.squeeze(0)?;
     let s = scales.narrow(0, 0, 1)?.squeeze(0)?;
-    let out =
-        attention_rs::nvfp4_linear::nvfp4_matmul(&input, &w, &s, 1.25, 1.0, None, m >= 32, None)?;
+    let out = attention_rs::nvfp4_linear::nvfp4_matmul(
+        &input,
+        &w,
+        &s,
+        1.25,
+        1.0,
+        None,
+        m >= 32,
+        None,
+        None,
+    )?;
     record(file, &format!("{name}/input"), &input)?;
     record(file, &format!("{name}/weight_u8"), &w)?;
     record(file, &format!("{name}/weight_scale_u8"), &s)?;
@@ -272,6 +281,7 @@ fn run_moe(
         None,
         is_prefill,
         Some(&topk_weights),
+        None,
         None,
     )?;
     for (suffix, tensor) in [

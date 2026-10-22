@@ -9,6 +9,7 @@ pub mod mask;
 pub mod mla_attention;
 pub mod mlp;
 pub mod moe;
+pub mod moe_offload;
 pub mod moe_w2_delta;
 pub mod others;
 pub mod qwen4;
