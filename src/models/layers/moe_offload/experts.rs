@@ -25,7 +25,7 @@ struct Inner<const N: usize> {
     staging: [Tensor; N],
     src: [u64; N],
     bytes: [u64; N],
-    slots: RwLock<Slots<N>>,
+    slots: RwLock<Option<Slots<N>>>,
 }
 
 /// `N` expert tensors of one MoE layer (e.g. gate_up, gate_up scales, down, down scales).
@@ -89,14 +89,23 @@ impl<const N: usize> SlotPool for Inner<N> {
         self.num_experts
     }
     fn num_slots(&self) -> usize {
-        self.slots.read().unwrap().cache.num_slots()
+        self.slots
+            .read()
+            .unwrap()
+            .as_ref()
+            .expect("MoE offload slots unavailable")
+            .cache
+            .num_slots()
     }
     fn slot_bytes(&self) -> usize {
         self.bytes.iter().sum::<u64>() as usize
     }
     fn resize(&self, num_slots: usize) -> Result<()> {
-        *self.slots.write().unwrap() =
-            make_slots(&self.dev, self.num_experts, &self.shapes, num_slots)?;
+        // Drop the old CUDA allocations before making the replacement.  Auto sizing is
+        // performed before inference, so no forward can observe the temporary `None`.
+        self.slots.write().unwrap().take();
+        let slots = make_slots(&self.dev, self.num_experts, &self.shapes, num_slots)?;
+        *self.slots.write().unwrap() = Some(slots);
         Ok(())
     }
 }
@@ -144,7 +153,7 @@ impl<const N: usize> ExpertOffload<N> {
             banks,
             shapes,
             staging: arr(staging),
-            slots: RwLock::new(slots),
+            slots: RwLock::new(Some(slots)),
         });
         register(inner.clone());
         Ok((Self(inner), empty))
@@ -154,7 +163,8 @@ impl<const N: usize> ExpertOffload<N> {
     /// full-layer staging weights) and the expert tensors the kernels must read.
     pub fn prepare(&self, topk_ids: Tensor, is_prefill: bool) -> Result<(Tensor, [Tensor; N])> {
         let o = &self.0;
-        let s = o.slots.read().unwrap();
+        let slots = o.slots.read().unwrap();
+        let s = slots.as_ref().expect("MoE offload slots unavailable");
         let t = profile_begin(&o.dev)?;
         let out = match s.cache.plan(&topk_ids, is_prefill)? {
             Plan::Staged => {

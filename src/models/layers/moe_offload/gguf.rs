@@ -25,7 +25,7 @@ struct Inner {
     // (N, K, dtype) of gate, up, down.
     shapes: [(usize, usize, GgmlDType); 3],
     staging: [Arc<QTensor>; 3],
-    slots: RwLock<Slots>,
+    slots: RwLock<Option<Slots>>,
 }
 
 pub struct GgufExpertOffload(Arc<Inner>);
@@ -65,14 +65,21 @@ impl SlotPool for Inner {
         self.num_experts
     }
     fn num_slots(&self) -> usize {
-        self.slots.read().unwrap().cache.num_slots()
+        self.slots
+            .read()
+            .unwrap()
+            .as_ref()
+            .expect("GGUF MoE offload slots unavailable")
+            .cache
+            .num_slots()
     }
     fn slot_bytes(&self) -> usize {
         self.banks.iter().map(|b| b.expert_bytes).sum()
     }
     fn resize(&self, num_slots: usize) -> Result<()> {
-        *self.slots.write().unwrap() =
-            make_slots(&self.dev, self.num_experts, &self.shapes, num_slots)?;
+        self.slots.write().unwrap().take();
+        let slots = make_slots(&self.dev, self.num_experts, &self.shapes, num_slots)?;
+        *self.slots.write().unwrap() = Some(slots);
         Ok(())
     }
 }
@@ -115,7 +122,7 @@ impl GgufExpertOffload {
     /// still be on the GPU). `None` unless `XINFER_MOE_OFFLOAD` applies here.
     pub fn for_isq(
         device: &Device,
-        world_size: usize,
+        _world_size: usize,
         experts: [&QTensor; 3],
         topk: usize,
     ) -> Result<Option<Self>> {
@@ -125,12 +132,6 @@ impl GgufExpertOffload {
         let Device::Cuda(dev) = device else {
             candle_core::bail!("XINFER_MOE_OFFLOAD requires a CUDA device");
         };
-        if world_size > 1 {
-            crate::log_warn!(
-                "XINFER_MOE_OFFLOAD is ignored with tensor parallelism (world_size > 1)"
-            );
-            return Ok(None);
-        }
         Self::new(dev, rate, &experts, topk).map(Some)
     }
 
@@ -165,7 +166,7 @@ impl GgufExpertOffload {
             banks: arr3(banks),
             shapes,
             staging: arr3(staging),
-            slots: RwLock::new(slots),
+            slots: RwLock::new(Some(slots)),
         });
         register(inner.clone());
         Ok(Self(inner))
@@ -193,7 +194,8 @@ impl GgufExpertOffload {
         is_prefill: bool,
     ) -> Result<(Tensor, [Arc<QTensor>; 3])> {
         let o = &self.0;
-        let s = o.slots.read().unwrap();
+        let slots = o.slots.read().unwrap();
+        let s = slots.as_ref().expect("GGUF MoE offload slots unavailable");
         let t = profile_begin(&o.dev)?;
         let out = match s.cache.plan(&topk_ids, is_prefill)? {
             Plan::Staged => {

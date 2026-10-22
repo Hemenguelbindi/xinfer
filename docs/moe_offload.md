@@ -5,9 +5,19 @@ experts stay in pinned host RAM; each MoE layer keeps a fraction of its experts
 in GPU *slots*. Attention, dense layers, shared experts and the KV cache stay on
 the GPU as usual.
 
+This feature requires a CUDA build. Tensor parallelism (`--d 0,1`, etc.) also
+requires NCCL; dense models do not enter the offload path and are unaffected
+when the variable is unset.
+
 ```bash
-# keep 20% of every layer's experts on the GPU, the rest in host RAM
-XINFER_MOE_OFFLOAD=0.2 xinfer --m nvidia/Qwen3.6-35B-A3B-NVFP4 --max-model-len 8192 --ui-server
+# Keep 20% of every layer's experts on GPU (at least one top-k decode step),
+# and keep the remaining experts in host RAM. TP works rank-by-rank.
+XINFER_MOE_OFFLOAD=0.2 xinfer \
+    --m Qwen/Qwen3.5-35B-A3B-FP8 --d 0,1 --max-model-len 8192 --ui-server
+
+# Or size the per-layer GPU caches automatically from free VRAM.
+XINFER_MOE_OFFLOAD=auto xinfer \
+    --m Qwen/Qwen3.5-35B-A3B-FP8 --d 0,1 --max-model-len 8192 --ui-server
 ```
 
 Placement never changes routing or precision: with greedy decoding the output
@@ -23,7 +33,7 @@ is byte-identical for every `XINFER_MOE_OFFLOAD` value.
   device memory, so decode stays inside CUDA graphs with no host sync.
 - **Prefill** — when a call touches more distinct experts than the layer has
   slots, the whole expert layer is copied (pinned async memcpy) into a staging
-  buffer shared by all layers, and the unmodified GEMM runs on it.
+  buffer, and the unmodified GEMM runs on it.
 - The GEMM kernels are unchanged: they read `[num_slots, N, K]` slot tensors
   instead of `[num_experts, N, K]`.
 
@@ -34,7 +44,7 @@ Design follows [FreeToken](https://github.com/FlashML-org/FreeToken) (Apache-2.0
 | Variable | Meaning |
 |---|---|
 | `XINFER_MOE_OFFLOAD=auto` | After loading, grow every layer's slots evenly into the free VRAM, leaving the reserve below for the KV cache and workspaces (recommended) |
-| `XINFER_MOE_OFFLOAD=<0..1>` | Fixed fraction of each layer's experts kept on the GPU (at least `num_experts_per_tok`). Unset = no offload |
+| `XINFER_MOE_OFFLOAD=<0..1>` | Fixed fraction of each layer's experts kept on the GPU; for example, `0.2` means 20% (at least `num_experts_per_tok`). Unset = no offload |
 | `XINFER_MOE_OFFLOAD_RESERVE_GB` | VRAM left free by `auto` (default 2.5). Raise it for longer contexts |
 | `XINFER_MOE_OFFLOAD_PROFILE=1` | Logs a per-MoE-call time split (launch gap, GPU wait, host, copy). Adds device syncs and disables CUDA graphs; diagnostics only |
 
@@ -42,6 +52,12 @@ More experts on the GPU means faster decode; more reserve means a longer
 context. TurboQuant (`--kvcache-dtype turbo4|turbo3`) stretches the reserve
 ~4x. Models with a large KV per token (e.g. Gemma 4) need `fp8` or `turbo*`.
 MTP (`--num-speculative-tokens`) works but was slower in our tests.
+
+For tensor-parallel inference, pass multiple devices with `--d 0,1` (or more
+devices). Every rank must be able to read the model files locally. Each rank
+loads and offloads its own expert shard, while NCCL continues to combine the
+rank-local MoE results. The offload fraction applies independently to every
+rank and every MoE layer.
 
 ## Supported
 
@@ -55,10 +71,11 @@ MTP (`--num-speculative-tokens`) works but was slower in our tests.
     share one generic path that keeps every `[E, ...]` expert tensor (weights and
     scales, any dtype) in host RAM.
 - Not supported: W2-packed DeepSeek-V4 experts (fails with a clear error).
-- Single GPU (`world_size == 1`), CUDA. NVFP4 on SM100+ (swizzled scales) is not
-  supported yet.
-- Tested on real models: GGUF, NVFP4, bf16 and ISQ. FP8, MXFP4 and WNA16 are
-  covered by the generic path's bit-exact GEMM test only.
+- CUDA single-GPU and tensor-parallel inference. NVFP4 on SM100+ (swizzled
+  scales) is not supported yet.
+- Tested on real models: GGUF, NVFP4, bf16, ISQ, and FP8 MoE safetensors,
+  including Qwen3.5-35B-A3B-FP8 with two-rank tensor parallelism. MXFP4 and
+  WNA16 are covered by the generic path's bit-exact GEMM test.
 - Host RAM must hold every expert (pinned).
 
 ## Benchmarks

@@ -37,7 +37,7 @@ struct Inner {
     full_vecs: [Tensor; 4],
     src: [u64; 8],
     bytes: [u64; 8],
-    slots: RwLock<Slots>,
+    slots: RwLock<Option<Slots>>,
 }
 
 pub struct Nvfp4ExpertOffload(Arc<Inner>);
@@ -99,14 +99,21 @@ impl SlotPool for Inner {
         self.num_experts
     }
     fn num_slots(&self) -> usize {
-        self.slots.read().unwrap().cache.num_slots()
+        self.slots
+            .read()
+            .unwrap()
+            .as_ref()
+            .expect("NVFP4 MoE offload slots unavailable")
+            .cache
+            .num_slots()
     }
     fn slot_bytes(&self) -> usize {
         self.bytes.iter().sum::<u64>() as usize
     }
     fn resize(&self, num_slots: usize) -> Result<()> {
-        *self.slots.write().unwrap() =
-            make_slots(&self.dev, self.num_experts, &self.big_dims, num_slots)?;
+        self.slots.write().unwrap().take();
+        let slots = make_slots(&self.dev, self.num_experts, &self.big_dims, num_slots)?;
+        *self.slots.write().unwrap() = Some(slots);
         Ok(())
     }
 }
@@ -155,7 +162,7 @@ impl Nvfp4ExpertOffload {
             full_vecs,
             src,
             bytes,
-            slots: RwLock::new(slots),
+            slots: RwLock::new(Some(slots)),
         });
         register(inner.clone());
         Ok(Self(inner))
@@ -178,7 +185,8 @@ impl Nvfp4ExpertOffload {
     /// full-layer staging weights) and the weights the kernels must read.
     pub fn prepare(&self, topk_ids: Tensor, is_prefill: bool) -> Result<(Tensor, Nvfp4Weights)> {
         let o = &self.0;
-        let s = o.slots.read().unwrap();
+        let slots = o.slots.read().unwrap();
+        let s = slots.as_ref().expect("NVFP4 MoE offload slots unavailable");
         let t = profile_begin(&o.dev)?;
         let out = match s.cache.plan(&topk_ids, is_prefill)? {
             Plan::Staged => {

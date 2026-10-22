@@ -108,7 +108,7 @@ impl SlotCache {
 /// CUDA device to offload onto when `XINFER_MOE_OFFLOAD` is set and supported here.
 pub fn offload_device(
     vb: &crate::models::layers::VarBuilderX,
-    world_size: usize,
+    _world_size: usize,
 ) -> Result<Option<CudaDevice>> {
     if crate::utils::env::moe_offload_rate().is_none() {
         return Ok(None);
@@ -116,10 +116,6 @@ pub fn offload_device(
     let Device::Cuda(dev) = vb.device() else {
         candle_core::bail!("XINFER_MOE_OFFLOAD requires a CUDA device");
     };
-    if world_size > 1 {
-        crate::log_warn!("XINFER_MOE_OFFLOAD is ignored with tensor parallelism (world_size > 1)");
-        return Ok(None);
-    }
     Ok(Some(dev))
 }
 

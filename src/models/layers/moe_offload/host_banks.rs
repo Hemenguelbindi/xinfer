@@ -27,8 +27,10 @@ impl HostBank {
             );
         }
         dev.bind_to_thread().map_err(candle_core::Error::wrap)?;
-        // Write-combined: written once here, then only read by the GPU.
-        let flags = sys::CU_MEMHOSTALLOC_WRITECOMBINED | sys::CU_MEMHOSTALLOC_DEVICEMAP;
+        // Keep the host bank cache-coherent.  These bytes are also read through the
+        // device mapping by the expert-cache gather kernel; write-combined mappings can
+        // expose partially ordered host writes to that path on some CUDA platforms.
+        let flags = sys::CU_MEMHOSTALLOC_DEVICEMAP;
         let ptr = unsafe { result::malloc_host(bytes.len(), flags) }.map_err(|e| {
             candle_core::Error::Msg(format!(
                 "XINFER_MOE_OFFLOAD: pinning {:.1} MB of host memory failed ({e}); \

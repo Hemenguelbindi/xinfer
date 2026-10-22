@@ -77,6 +77,17 @@ xinfer --m Qwen/Qwen3.8-... --d 0,1 --ui-server \
 
 详见 [docs/speculative_decoding.md](docs/speculative_decoding.md)。
 
+### 🧩 MoE 专家卸载
+
+MoE 专家卸载仅支持 CUDA。将大型 MoE 模型的专家权重卸载到主机内存。该值使用比例表示：`0.2` 表示每层 20% 的专家保留在 GPU，`auto` 表示自动选择缓存大小。张量并行需要 NCCL。
+
+```bash
+XINFER_MOE_OFFLOAD=0.2 xinfer \
+  --m Qwen/Qwen3.5-35B-A3B-FP8 --d 0,1 --ui-server
+```
+
+配置选项和 TP 详情请参阅 [MoE 专家卸载指南](docs/moe_offload.md)。
+
 > **提示：** 浏览器打开 `http://IP:8001` 即可使用内置对话界面，或使用 `http://IP:8000/v1/` 作为 API 服务 `Base URL`。
 
 ---
@@ -92,8 +103,6 @@ xinfer --m Qwen/Qwen3.8-... --d 0,1 --ui-server \
 | `turbo8` | **2.6×** | 79–100% 基线吞吐 | SM70+ / Apple M1|
 | `turbo4` | **3.7×** | 最佳平衡 | SM70+ / Apple M1|
 | `turbo3` | **4.7×** | 最大压缩 | SM70+ |
-
----
 
 ## 📈 性能
 

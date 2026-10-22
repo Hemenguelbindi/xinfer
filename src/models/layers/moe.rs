@@ -1470,14 +1470,25 @@ impl FusedMoeGGUF {
             (gate_q, up_q, down_q)
         };
 
+        // The tensors above are already sharded for this rank.  Offloading these local
+        // shards is therefore compatible with TP; the existing all-reduce below still
+        // combines each rank's partial expert result.
+        #[cfg(feature = "cuda")]
+        let (offload, gate_experts, up_experts, down_experts) =
+            match crate::models::layers::moe_offload::gguf::GgufExpertOffload::for_isq(
+                &vb.device(),
+                comm.world_size(),
+                [&gate_experts, &up_experts, &down_experts],
+                moe_cfg.num_experts_per_tok,
+            )? {
+                Some(o) => {
+                    let (g, u, d) = o.placeholders()?;
+                    (Some(o), g, u, d)
+                }
+                None => (None, gate_experts, up_experts, down_experts),
+            };
         let world_size = comm.world_size();
-
         let bias = try_load_e_score_correction_bias(&vb, num_experts);
-        if crate::utils::env::moe_offload_rate().is_some() {
-            crate::log_warn!(
-                "XINFER_MOE_OFFLOAD is ignored with tensor parallelism (world_size > 1)"
-            );
-        }
 
         Ok(Self {
             gate,
@@ -1490,7 +1501,7 @@ impl FusedMoeGGUF {
             world_size,
             dtype,
             #[cfg(feature = "cuda")]
-            offload: None,
+            offload,
         })
     }
 
