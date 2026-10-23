@@ -5,6 +5,8 @@ use crate::models::layers::mlp::MLP;
 use crate::models::layers::moe::{
     FusedMoe, FusedMoeGGUF, FusedMoeISQ, FusedMoeMxfp4, FusedMoeNvfp4, FusedMoeWNA16,
 };
+#[cfg(feature = "cuda")]
+use crate::models::layers::moe_offload::{experts::host_bytes, host_banks::HostBank};
 use crate::models::layers::others::{embedding, rms_norm, NormX};
 use crate::models::layers::rotary_emb::{ApplyRotaryEmbedding, RotaryEmbedding};
 use crate::models::layers::VarBuilderX;
@@ -498,7 +500,8 @@ impl Gemma4DecoderLayer {
         positions: &Tensor,
         cache: Option<(&Tensor, &Tensor)>,
         input_metadata: &InputMetadata,
-    ) -> Result<Tensor> {
+        shared_kv: Option<(&Tensor, &Tensor)>,
+    ) -> Result<(Tensor, (Tensor, Tensor))> {
         let xs = xs.clone();
 
         let residual = xs.clone();
@@ -516,9 +519,16 @@ impl Gemma4DecoderLayer {
             self.rotary_emb.clone()
         };
 
-        let attn_output =
-            self.self_attn
-                .forward(&normed, &Some(rope), mask, positions, cache, input_metadata)?;
+        let (attn_output, kv) = self.self_attn.forward_with_kv(
+            &normed,
+            &Some(rope),
+            mask,
+            positions,
+            cache,
+            input_metadata,
+            None,
+            shared_kv,
+        )?;
 
         let mut xs = self.post_attention_layernorm.forward(&attn_output)?;
         xs = (xs + &residual)?;
@@ -584,12 +594,15 @@ impl Gemma4DecoderLayer {
             let gated = gate
                 .forward(&xs)?
                 .apply(&candle_nn::Activation::GeluPytorchTanh)?;
-            let gated = (gated * pli)?;
+            let gated = (&gated * pli.to_dtype(gated.dtype())?)?;
             let projected = proj.forward(&gated)?;
             xs = (&residual_ple + norm.forward(&projected)?)?;
         }
 
-        xs.broadcast_mul(&self.layer_scalar.to_dtype(xs.dtype())?)
+        Ok((
+            xs.broadcast_mul(&self.layer_scalar.to_dtype(xs.dtype())?)?,
+            kv,
+        ))
     }
 }
 
@@ -611,6 +624,52 @@ pub struct Gemma4ForCausalLM {
     layer_types: Vec<String>,
     hidden_size_per_layer_input: Option<usize>,
     num_hidden_layers: usize,
+    // Layers from this index reuse the K/V of the last earlier layer of the same type.
+    first_kv_shared_layer: usize,
+    #[cfg(feature = "cuda")]
+    _ple_host: Option<PleHostTable>,
+}
+
+/// Pinned host memory behind a device-mapped `embed_tokens_per_layer`. The tensor is never
+/// dropped: its slice is not a device allocation, so it must not reach `cuMemFree`.
+#[cfg(feature = "cuda")]
+struct PleHostTable {
+    _bank: HostBank,
+    _tensor: std::mem::ManuallyDrop<Tensor>,
+}
+
+/// Moves the per-layer embedding table (~5 GB for E2B/E4B) into pinned host memory mapped
+/// into the GPU address space. Lookups gather a few rows over PCIe, inside CUDA graphs too.
+#[cfg(feature = "cuda")]
+fn map_host_table(w: &Tensor, dev: &candle_core::CudaDevice) -> Result<(Tensor, PleHostTable)> {
+    use candle_core::{CudaStorage, Storage};
+    let bank = HostBank::new(dev, &host_bytes(w)?, 1)?;
+    let n = w.elem_count();
+    let storage = unsafe {
+        match w.dtype() {
+            DType::BF16 => CudaStorage::wrap_cuda_slice(
+                dev.upgrade_device_ptr::<half::bf16>(bank.dev_ptr, n),
+                dev.clone(),
+            ),
+            DType::F16 => CudaStorage::wrap_cuda_slice(
+                dev.upgrade_device_ptr::<half::f16>(bank.dev_ptr, n),
+                dev.clone(),
+            ),
+            DType::F32 => CudaStorage::wrap_cuda_slice(
+                dev.upgrade_device_ptr::<f32>(bank.dev_ptr, n),
+                dev.clone(),
+            ),
+            dt => candle_core::bail!("per-layer embedding: unsupported dtype {dt:?}"),
+        }
+    };
+    let t = Tensor::from_storage(Storage::Cuda(storage), w.shape().clone())?;
+    Ok((
+        t.clone(),
+        PleHostTable {
+            _bank: bank,
+            _tensor: std::mem::ManuallyDrop::new(t),
+        },
+    ))
 }
 
 impl Gemma4ForCausalLM {
@@ -765,15 +824,24 @@ impl Gemma4ForCausalLM {
             dtype,
         )?;
 
+        #[cfg(feature = "cuda")]
+        let mut ple_host = None;
         let (embed_tokens_per_layer, per_layer_model_projection, per_layer_projection_norm) =
             if let Some(pli_dim) = hidden_size_per_layer_input {
                 let total_dim = pli_dim * config.num_hidden_layers;
-                let (emb, _) = embedding(
-                    config.vocab_size,
-                    total_dim,
-                    vb.pp(&format!("{}.embed_tokens_per_layer", lm_prefix)),
-                    dtype,
-                )?;
+                let emb_vb = vb.pp(&format!("{}.embed_tokens_per_layer", lm_prefix));
+                #[cfg(feature = "cuda")]
+                let emb = match (emb_vb.cpu_var_builder(), config.vocab_size, device) {
+                    (Some(cpu_vb), Some(vs), Device::Cuda(dev)) => {
+                        let w = cpu_vb.get((vs, total_dim), "weight")?.to_dtype(dtype)?;
+                        let (w, host) = map_host_table(&w, dev)?;
+                        ple_host = Some(host);
+                        candle_nn::Embedding::new(w, total_dim)
+                    }
+                    _ => embedding(config.vocab_size, total_dim, emb_vb, dtype)?.0,
+                };
+                #[cfg(not(feature = "cuda"))]
+                let emb = embedding(config.vocab_size, total_dim, emb_vb, dtype)?.0;
 
                 let proj_vb = vb.pp(&format!("{}.per_layer_model_projection", lm_prefix));
                 let proj_linear = match &proj_vb.0 {
@@ -983,6 +1051,9 @@ impl Gemma4ForCausalLM {
             layer_types,
             hidden_size_per_layer_input,
             num_hidden_layers: config.num_hidden_layers,
+            first_kv_shared_layer,
+            #[cfg(feature = "cuda")]
+            _ple_host: ple_host,
         })
     }
 
@@ -1015,7 +1086,8 @@ impl Gemma4ForCausalLM {
         let embedded = emb_per_layer.forward(input_ids)?;
         let embedded = (embedded * (pli_dim as f64).sqrt())?;
 
-        let projected = inputs_embeds.apply(proj)?;
+        // GGUF/ISQ keep the embeddings in F32 while this projection stays in the model dtype.
+        let projected = inputs_embeds.to_dtype(proj.weight().dtype())?.apply(proj)?;
         let projected = (projected * (self.config.hidden_size as f64).powf(-0.5))?;
 
         let seq_len = input_ids.dim(0)?;
@@ -1074,11 +1146,19 @@ impl Gemma4ForCausalLM {
         );
 
         if let Some(kv_caches) = kv_caches {
+            // Last non-shared K/V per attention type: [sliding, full].
+            let mut last_kv: [Option<(Tensor, Tensor)>; 2] = [None, None];
             for ((k_cache, v_cache), (i, layer)) in
                 zip(kv_caches.iter(), self.layers.iter().enumerate())
             {
                 let pli = per_layer_inputs.as_ref().map(|v| &v[i]);
-                xs = layer.forward(
+                let slot = if layer.is_sliding { 0 } else { 1 };
+                let shared_kv = if i >= self.first_kv_shared_layer {
+                    last_kv[slot].as_ref().map(|(k, v)| (k, v))
+                } else {
+                    None
+                };
+                let (out, kv) = layer.forward(
                     &xs,
                     pli,
                     sliding_mask.as_ref(),
@@ -1086,7 +1166,12 @@ impl Gemma4ForCausalLM {
                     positions,
                     Some((k_cache, v_cache)),
                     input_metadata,
+                    shared_kv,
                 )?;
+                xs = out;
+                if i < self.first_kv_shared_layer {
+                    last_kv[slot] = Some(kv);
+                }
             }
         }
 
