@@ -198,10 +198,10 @@ pub fn config_from_gguf<R: std::io::Seek + std::io::Read>(
                 .and_then(|v| v.to_vec())
                 .ok()
                 .and_then(|arr| arr.first().and_then(gguf_value_u32));
-            if let Some(first) = per_layer {
-                Ok(first as usize)
-            } else if arch == "qwen35moe" {
+            if arch == "qwen35moe" {
                 Ok(0) //Qwen3.5 MoE has no MLP layer
+            } else if let Some(first) = per_layer {
+                Ok(first as usize)
             } else {
                 candle_core::bail!("cannot find {arch}.feed_forward_length in metadata")
             }
